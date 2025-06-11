@@ -1,6 +1,7 @@
 import threading
 import torch
 import os
+import logging
 # from env import Env
 from naf_lstm import NAF_LSTM
 import mpsched
@@ -11,6 +12,12 @@ import time
 import numpy as np
 from torch.autograd import Variable
 
+# 改进1: 配置日志系统 - 减少日志混乱
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
 
 class Online_Agent(threading.Thread):
     """Class for Online Agent thread that calls evnironment step to perform agent<->enviornment interaction as expected in reinforcement
@@ -50,6 +57,49 @@ class Online_Agent(threading.Thread):
                        c=self.cfg.getfloat('env', 'c'),
                        max_flows=self.max_flows)
         self.event = event
+        # 改进2: 添加模型同步相关变量
+        self.step_count = 0  # 记录执行了多少步
+        self.model_sync_interval = 150  # 每50步重新加载一次模型
+        self.last_model_mtime = 0  # 记录模型文件的最后修改时间
+        # 改进3: 添加性能监控变量
+        self.recent_rewards = []  # 存储最近的奖励值
+        self.reward_window = 100  # 统计窗口大小
+
+    def _should_reload_model(self):
+        """检查是否需要重新加载模型"""
+        try:
+            if os.path.exists(self.agent_name):
+                current_mtime = os.path.getmtime(self.agent_name)
+                if current_mtime > self.last_model_mtime:
+                    self.last_model_mtime = current_mtime
+                    return True
+        except Exception as e:
+            logging.warning(f"[Online Agent] Error checking model file: {e}")
+        return False
+
+    def _reload_model(self):
+        """重新加载模型"""
+        try:
+            self.agent = torch.load(self.agent_name)
+            logging.info(f"[Online Agent] Reloaded model at step {self.step_count}")
+        except Exception as e:
+            logging.error(f"[Online Agent] Error reloading model: {e}")
+
+    def _update_reward_stats(self, reward):
+        """更新奖励统计"""
+        self.recent_rewards.append(reward)
+        if len(self.recent_rewards) > self.reward_window:
+            self.recent_rewards.pop(0)  # 保持窗口大小
+
+    def _log_performance(self):
+        """记录性能统计（减少日志频率）"""
+        if self.step_count % 20 == 0:  # 每20步记录一次，而不是每步都记录
+            if self.recent_rewards:
+                avg_reward = sum(self.recent_rewards) / len(self.recent_rewards)
+                latest_reward = self.recent_rewards[-1]
+                logging.info(f"[Online Agent] Step {self.step_count}: "
+                           f"Latest reward: {latest_reward:.4f}, "
+                           f"Avg reward (last {len(self.recent_rewards)}): {avg_reward:.4f}")
 
     def run(self):
         """Override the run method from threading with the desired behaviour of the Online Agent class"""
@@ -57,32 +107,40 @@ class Online_Agent(threading.Thread):
             self.event.wait()
             state = self.env.reset()
             k = self.cfg.getint('env', 'k')  # k=8
-            print(
+            # 改进4: 减少初始化日志的频率
+            logging.info(
                 f"[Online Agent] Initial RTTs = {np.array(state)[self.max_flows:self.max_flows*2,7].tolist()}"
             )
             state = torch.FloatTensor(state).view(-1, 1, k, 1)
             while True:
+                self.step_count += 1
+                # 改进5: 定期检查并重新加载模型
+                if self.step_count % self.model_sync_interval == 0:
+                    if self._should_reload_model():
+                        self._reload_model()
                 start = time.time()
                 if self.explore:
                     action = self.agent.select_action(state, self.ounoise)
                 else:
                     action = self.agent.select_action(state)
                 end = time.time()
-                print(
-                    f"[Online Agent] Chosen split action = {action}"
-                )
-                print(
-                    f"[Online Agent] Action compute time = {end-start:.4f}s"
-                )
+                
+                # 改进6: 减少详细日志的频率
+                if self.step_count % 10 == 0:  # 每10步记录一次详细信息
+                    logging.debug(f"[Online Agent] Step {self.step_count}: "
+                                f"Chosen split action = {action}, "
+                                f"Action compute time = {end-start:.4f}")
                 state_nxt, reward, done = self.env.step((action))
-                print(
-                    f"[Online Agent] Received reward = {reward:.6f}"
-                )
+                # 改进7: 更新奖励统计
+                self._update_reward_stats(reward)
+                self._log_performance()
                 if done or not self.event.is_set():
+                    logging.info(f"[Online Agent] Episode finished at step {self.step_count}")
                     break
-                print(
-                    f"[Online Agent] Next RTTs = {np.array(state_nxt)[self.max_flows:self.max_flows*2,7].tolist()}"
-                )
+                # 改进8: 减少状态日志频率
+                if self.step_count % 20 == 0:
+                    logging.debug(f"[Online Agent] Next RTTs = "
+                                f"{np.array(state_nxt)[self.max_flows:self.max_flows*2,-1].tolist()}")  
                 action = torch.FloatTensor(action)
                 mask = torch.Tensor([not done])
                 state_nxt = torch.FloatTensor(state_nxt).view(-1, 1, k, 1)
@@ -118,22 +176,68 @@ class Offline_Agent(threading.Thread):
         self.batch_size = cfg.getint("train", "batch_size")
         self.event = event
         max_flows = cfg.getint("env", "max_num_subflows")
+        # 改进10: 添加训练相关参数
+        self.training_frequency = 5  # 每次训练5个batch而不是1个
+        self.min_memory_size = self.batch_size * 2  # 最小内存要求
+        self.check_interval = 20  # 每20秒检查一次，而不是等60秒
+        self.save_interval = 200  # 每200次训练保存一次模型
+        # 改进11: 添加训练监控变量
+        self.training_step = 0
+        self.recent_losses = []
+        self.loss_window = 50
+
+    def _update_loss_stats(self, loss):
+        """更新损失统计"""
+        self.recent_losses.append(loss)
+        if len(self.recent_losses) > self.loss_window:
+            self.recent_losses.pop(0)
+
+    def _log_training_progress(self):
+        """记录训练进度"""
+        if self.training_step % 20 == 0:  # 每20次训练记录一次
+            if self.recent_losses:
+                avg_loss = sum(self.recent_losses) / len(self.recent_losses)
+                latest_loss = self.recent_losses[-1]
+                logging.info(f"[Offline Agent] Training step {self.training_step}: "
+                           f"Latest loss: {latest_loss:.6f}, "
+                           f"Avg loss (last {len(self.recent_losses)}): {avg_loss:.6f}")
 
     def run(self):
         """Starts the training loop for the ReLes NN"""
         # subject to change
         agent = torch.load(self.model)
-        print("[Offline Agent] Starting offline training loop")
+        logging.info("[Offline Agent] Starting offline training loop")
         while True:
-            self.event.wait(timeout=60)
+            # 改进13: 改进训练触发机制 - 更频繁的检查
+            self.event.wait(timeout=self.check_interval)  # 每20秒检查而不是60秒
+            # 改进17: 检查是否需要退出
+            if not self.event.is_set():
+                logging.info("[Offline Agent] Event cleared, preparing to exit")
+                try:
+                    torch.save(agent, self.model)
+                    logging.info("[Offline Agent] Final model saved")
+                except Exception as e:
+                    logging.error(f"[Offline Agent] Error saving final model: {e}")
+                break
             if len(self.memory) > self.batch_size:
-                print(
-                    f"[Offline Agent] Memory size = {len(self.memory)}, batch_size = {self.batch_size}"
-                )
-                for __ in range(1):
+                memory_size = len(self.memory)
+                # 每50次训练记录一次内存状态
+                if self.training_step % 50 == 0:
+                    logging.info(f"[Offline Agent] Memory size = {memory_size}, "
+                                f"Training step = {self.training_step}")
+                for __ in range(self.training_frequency):
                     transitions = self.memory.sample(self.batch_size)
                     batch = Transition(*zip(*transitions))
-                    print(agent.update_parameters(batch))
-                    if not self.event.is_set():
-                        torch.save(agent,self.model)
-                        break
+                    # 更新网络参数
+                    loss, _ = agent.update_parameters(batch)
+                    self.training_step += 1
+                    # 更新损失统计
+                    self._update_loss_stats(loss)
+                    self._log_training_progress()
+                # 改进16: 定期保存模型，而不只是在结束时保存
+                if self.training_step % self.save_interval == 0:
+                        try:
+                            torch.save(agent, self.model)
+                            logging.info(f"[Offline Agent] Model saved at training step {self.training_step}")
+                        except Exception as e:
+                            logging.error(f"[Offline Agent] Error saving model: {e}")
