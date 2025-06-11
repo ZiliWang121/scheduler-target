@@ -78,6 +78,8 @@ class Policy(nn.Module):
 		
 		x,u = inputs
 		
+		# LSTM部分保持不变...
+		batch_size = x.size(1)  # 这里修正batch_size的获取
 		#stacked LSTM implmentation
 		self.h0 = torch.zeros(2,x.size(1),self.hidden_lstm) 
 		self.c0 = torch.zeros(2,x.size(1),self.hidden_lstm)
@@ -106,9 +108,13 @@ class Policy(nn.Module):
 		x10 = x10[:,-1,:]
 		
 		x = torch.cat([x1,x2,x3,x4,x5,x6,x7,x8,x9,x10],dim=-1)
-	
+
+		# 添加BatchNorm（这是唯一需要的修改）
+		x = self.bn0(x)
 		x = torch.relu(self.linear1(x))
+		x = self.bn1(x)
 		x = torch.relu(self.linear2(x))
+		x = self.bn2(x)
 		
 		V = self.V(x)
 		mu = F.softmax(self.mu(x), dim=1)  # 确保概率分布，和为1
@@ -147,7 +153,7 @@ class NAF_LSTM:
 		if exploration is not None:
 			mu += torch.Tensor(exploration.noise())
 			
-		return mu.clamp(-1,1)
+		return mu.clamp(0,1)
 		
 	def update_parameters(self,batch):
 		state_batch = Variable(torch.cat(batch.state,dim=1))   #torch.stack(batch.state).transpose(0,1))

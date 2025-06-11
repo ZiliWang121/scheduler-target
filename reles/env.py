@@ -82,7 +82,7 @@ class Env():
         :type: float
         """
         V_throughput = self.tp[0][self.k-1] + self.tp[1][self.k-1]
-        rewards = ((self.tp[0][self.k-1])+(self.tp[1][self.k-1]))
+        #rewards = ((self.tp[0][self.k-1])+(self.tp[1][self.k-1]))
         if V_throughput>0:
             V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
                  self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput
@@ -92,8 +92,8 @@ class Env():
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
         # 最终奖励
         reward = V_throughput - self.alpha * V_RTT - self.b * V_loss
-        
-        return rewards
+        print(f"[Env.reward]reward={reward:.3f}")
+        return reward  # ← 返回正确计算的reward
         
     def reset(self):
         #在MPTCP连接开始时初始化LSTM需要的历史数据
