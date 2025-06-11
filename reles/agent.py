@@ -85,7 +85,7 @@ class Online_Agent(threading.Thread):
                 )
                 action = torch.FloatTensor(action)
                 mask = torch.Tensor([not done])
-                state_nxt = torch.FloatTensor(state_nxt).view(-1, 1, 8, 1)
+                state_nxt = torch.FloatTensor(state_nxt).view(-1, 1, k, 1)
                 reward = torch.FloatTensor([float(reward)])
                 self.memory.push(state, action, mask, state_nxt, reward)
                 state = state_nxt
