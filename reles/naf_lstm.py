@@ -111,7 +111,7 @@ class Policy(nn.Module):
 		x = torch.relu(self.linear2(x))
 		
 		V = self.V(x)
-		mu = torch.tanh(self.mu(x)) 
+		mu = F.softmax(self.mu(x), dim=1)  # 确保概率分布，和为1
 		
 		Q = None
 		if u is not None:

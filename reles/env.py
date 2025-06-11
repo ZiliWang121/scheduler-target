@@ -62,9 +62,11 @@ class Env():
                 for _ in range(self.max_num_flows-len(state)):
                     state.append([0,0,0,0,0])
             self.tp[i].append(np.abs(state[i][0]-self.last[i][0])*1.44)
+            #self.tp[i].append(np.abs(state[i][0]-self.last[i][0])*1.5)
             self.rtt[i].append((state[i][1])/1000)
             self.dRtt[i].append(state[i][1]-self.last[i][1])
             self.cwnd[i].append((state[i][2]+self.last[i][2])/2)
+            #self.cwnd[i].append(state[i][2])
             self.rr[i].append(np.abs(state[i][3]-self.last[i][3]))
             self.in_flight[i].append(np.abs(state[i][4]-self.last[i][4]))#look at wording in reles paper
         self.last = state
@@ -79,17 +81,22 @@ class Env():
         :return: Reward value
         :type: float
         """
+        V_throughput = self.tp[0][self.k-1] + self.tp[1][self.k-1]
         rewards = ((self.tp[0][self.k-1])+(self.tp[1][self.k-1]))
-        if rewards!=0:
-            rewards = rewards - (1/rewards)*self.alpha* \
-            ((self.rtt[0][self.k-1]*self.tp[0][self.k-1]+self.rtt[1][self.k-1]*self.tp[1][self.k-1]))
+        if V_throughput>0:
+            V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
+                 self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput
         else:
-            rewards = 0
-        rewards = rewards - self.b * (self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1])
+            V_RTT = 0
+        # V_loss = Σv_t,i (总重传包数)
+        V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
+        # 最终奖励
+        reward = V_throughput - self.alpha * V_RTT - self.b * V_loss
         
         return rewards
         
     def reset(self):
+        #在MPTCP连接开始时初始化LSTM需要的历史数据
         """Initialization of the Environment variables with the first k measurments where k is the number of past timesteps used in
         the stacked LSTM part of the NAF Q-network
         
@@ -145,11 +152,11 @@ class Env():
         
         splits = []
         A = [self.fd]
+        SCALE   = 100                           # 精度 1 %
         
         for k in range(self.max_num_flows):
-            ratio   = max(0.0, (action[0][k]+1)/2)   # 连续 0‥1
-            SCALE   = 100                           # 精度 1 %
-            weight  = int(round(ratio * SCALE))     # 0‥100
+            #用softmax后已经不需要了：ratio   = max(0.0, (action[0][k]+1)/2)   # 连续 0‥1
+            weight  = int(round(action[0][k] * SCALE))     # 0‥100
             splits.append(weight)
         A = list(np.concatenate((A,splits)))
         print(f"[Env.step] Applied splits = {splits}")

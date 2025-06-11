@@ -37,9 +37,9 @@ class Online_Agent(threading.Thread):
         self.cfg = cfg
         self.memory = memory
         self.agent_name = cfg.get('nafcnn', 'agent')
-        self.ounoise = OUNoise(action_dimension=self.max_flows)
         self.explore = explore
         self.max_flows = cfg.getint('env', 'max_num_subflows')
+        self.ounoise = OUNoise(action_dimension=self.max_flows)
         self.agent = torch.load(self.agent_name)
         mpsched.persist_state(fd)
         self.env = Env(fd=self.fd,
@@ -56,18 +56,17 @@ class Online_Agent(threading.Thread):
         if True:
             self.event.wait()
             state = self.env.reset()
+            k = self.cfg.getint('env', 'k')  # k=8
             print(
                 f"[Online Agent] Initial RTTs = {np.array(state)[self.max_flows:self.max_flows*2,7].tolist()}"
             )
-            state = torch.FloatTensor(state).view(-1, 1, 8, 1)
+            state = torch.FloatTensor(state).view(-1, 1, k, 1)
             while True:
                 start = time.time()
                 if self.explore:
                     action = self.agent.select_action(state, self.ounoise)
                 else:
                     action = self.agent.select_action(state)
-                #action = [[0.0, 0.0]]
-                action = [[1.0, -1.0]] 
                 end = time.time()
                 print(
                     f"[Online Agent] Chosen split action = {action}"
