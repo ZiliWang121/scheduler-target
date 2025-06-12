@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-FILES=("64kb.dat" "2mb.dat" "8mb.dat" "64mb.dat")
+#FILES=("64kb.dat" "2mb.dat" "8mb.dat" "64mb.dat")
+FILES=("8mb.dat" "64mb.dat")
 for f in "${FILES[@]}"; do
   [[ -f $f ]] || {
     echo "生成 $f …"

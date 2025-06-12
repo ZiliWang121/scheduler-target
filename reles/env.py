@@ -1,6 +1,7 @@
 import time
 import mpsched
 import numpy as np
+import torch
 
 class Env():
     """Evnironment class for agent interaction. 
@@ -156,7 +157,7 @@ class Env():
         
         for k in range(self.max_num_flows):
             #用softmax后已经不需要了：ratio   = max(0.0, (action[0][k]+1)/2)   # 连续 0‥1
-            weight  = int(round(action[0][k] * SCALE))     # 0‥100
+            weight  = int(torch.round(action[0][k] * SCALE))     # 0‥100
             splits.append(weight)
         A = list(np.concatenate((A,splits)))
         print(f"[Env.step] Applied splits = {splits}")
