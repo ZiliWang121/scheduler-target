@@ -60,7 +60,7 @@ class Online_Agent(threading.Thread):
         # 改进2: 添加模型同步相关变量
         self.step_count = 0  # 记录执行了多少步
         self.model_sync_interval = 150  # 每50步重新加载一次模型
-        self.last_model_mtime = 0  # 记录模型文件的最后修改时间
+        self.last_model_mtime = os.path.getmtime(self.agent_name) if os.path.exists(self.agent_name) else 0 # 记录模型文件的最后修改时间
         # 改进3: 添加性能监控变量
         self.recent_rewards = []  # 存储最近的奖励值
         self.reward_window = 100  # 统计窗口大小

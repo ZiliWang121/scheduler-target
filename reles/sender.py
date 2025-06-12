@@ -36,6 +36,8 @@ class MPTCPSender(threading.Thread):
         self.file_to_send = file_to_send
         self.IP = cfg.get('receiver','ip')
         self.PORT = cfg.getint('receiver','port')
+        # 🔧 创建传输专用的event
+        self.transfer_event = Event()
         
     def run(self):
         """建立MPTCP连接并发送文件"""
@@ -56,9 +58,13 @@ class MPTCPSender(threading.Thread):
             mpsched.persist_state(fd)
             
             # 启动Online Agent
-            agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, event=self.event)
+            # 使用独立的event控制
+            agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, 
+                               event=self.transfer_event)
+            # 启动Online Agent
+            # agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, event=self.event)
             agent.start()
-            self.event.set()
+            self.transfer_event.set()  # 启动智能体
             
             # 发送文件名
             filename_msg = f"FILE:{self.file_to_send}\n".encode('utf-8')
@@ -78,7 +84,7 @@ class MPTCPSender(threading.Thread):
         except Exception as e:
             print(f"[Sender] Error: {e}")
         finally:
-            self.event.clear()
+            self.transfer_event.clear()  # 只影响当前传输
             sock.close()
 
 def main(argv):
@@ -94,7 +100,9 @@ def main(argv):
     FILE = cfg.get('file','file')
     FILES = ["64kb.dat","2mb.dat","8mb.dat","64mb.dat"]
     
-    transfer_event = Event()
+    # 创建训练专用的event（永不清除）
+    training_event = Event()
+    training_event.set()  # 立即设置，保持训练活跃
     CONTINUE_TRAIN = 1
     num_iterations = 150
     scenario = "default"
@@ -137,9 +145,8 @@ def main(argv):
         action_space=MAX_NUM_FLOWS) #5 is the size of state space (TP,RTT,CWND,unACK,retrans)
         torch.save(agent,AGENT_FILE)
 
-    # 启动离线训练agent
-    off_agent = Offline_Agent(cfg=cfg,model=AGENT_FILE,memory=memory,event=transfer_event)
-    off_agent.daemon = True
+    # 初始化训练线程变量
+    off_agent = None
     
     # 用于保存性能指标（类似原client.py）
     performance_metrics = []
@@ -162,7 +169,8 @@ def main(argv):
             start_time = time.time()
             
             # 创建发送线程
-            sender = MPTCPSender(cfg, memory, transfer_event, FILE2)
+            # 修改：移除event参数
+            sender = MPTCPSender(cfg, memory, FILE2)
             sender.start()
             sender.join()  # 等待发送完成
             
@@ -189,8 +197,16 @@ def main(argv):
                 })
             
             # 检查是否需要启动离线训练
-            if len(memory) > BATCH_SIZE and not off_agent.is_alive():
-                off_agent.start()
+            # 修复：正确的训练线程管理
+            if len(memory) > BATCH_SIZE:
+                if off_agent is None or not off_agent.is_alive():
+                    # 创建新的训练线程
+                    off_agent = Offline_Agent(cfg=cfg, model=AGENT_FILE, 
+                                             memory=memory, event=training_event)
+                    off_agent.daemon = True
+                    off_agent.start()
+                    print(f"[Sender] Training started/restarted at iteration {i+1}")
+                    print(f"[Sender] Memory size: {len(memory)}")
                 
             # 短暂休息（类似原client.py）
             time.sleep(0.25)
@@ -203,6 +219,10 @@ def main(argv):
             
     except (KeyboardInterrupt, SystemExit):
         print("\n[Sender] Shutting down...")
+        training_event.clear()  # 停止训练
+        if off_agent and off_agent.is_alive():
+            print("[Sender] Waiting for training thread to finish...")
+            off_agent.join(timeout=5)
     finally:
         # 保存replay memory
         with open(MEMORY_FILE,'wb') as f:
