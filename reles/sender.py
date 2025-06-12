@@ -28,15 +28,14 @@ import random
 
 class MPTCPSender(threading.Thread):
     """处理单个MPTCP连接的发送线程"""
-    def __init__(self, cfg, memory, event, file_to_send):
+    def __init__(self, cfg, memory, file_to_send):
         threading.Thread.__init__(self)
         self.cfg = cfg
         self.memory = memory
-        self.event = event
         self.file_to_send = file_to_send
         self.IP = cfg.get('receiver','ip')
         self.PORT = cfg.getint('receiver','port')
-        # 🔧 创建传输专用的event
+        # 创建传输专用的event
         self.transfer_event = Event()
         
     def run(self):
