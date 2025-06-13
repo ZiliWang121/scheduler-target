@@ -1,1 +1,4 @@
 client/received_files/*.dat
+*.dat
+*.pkl
+*.csv
