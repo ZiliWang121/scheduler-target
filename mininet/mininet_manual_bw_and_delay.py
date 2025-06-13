@@ -6,11 +6,35 @@ from mininet.link import Link
 from mininet.cli import CLI
 from mininet.log import setLogLevel
 import os
+import sys
+
+# 替换原来的 check_for_real_interfaces() 内容为：
+def check_for_real_interfaces_in_code():
+    print("正在检查代码中是否误用了真实网卡名...")
+
+    # 可疑接口名列表（只报警如果代码中引用了它们）
+    dangerous_ifaces = ['eno1', 'enp2s0f0', 'enp2s0f1']
+
+    # 当前脚本名
+    this_file = os.path.abspath(__file__)
+
+    # 逐个接口名检查代码中是否引用
+    for iface in dangerous_ifaces:
+        grep_cmd = f"grep -w '{iface}' {this_file}"
+        result = os.popen(grep_cmd).read()
+        if iface in result:
+            print(f"警告：在脚本代码中发现引用真实网卡名 {iface}，已退出以保护系统！")
+            sys.exit(1)
+
+    print("脚本中未引用任何真实网卡，运行安全。")
+
 
 def simple_dual_link_shared_switch():
     os.system('mn -c')
     setLogLevel('info')
 
+    # 安全检测
+    check_for_real_interfaces_in_code
     # 不再使用 TCLink，避免隐式 delay 设置
     net = Mininet(controller=Controller, link=Link, switch=OVSSwitch)
 
