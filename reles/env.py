@@ -93,6 +93,8 @@ class Env():
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
         # 最终奖励
         reward = V_throughput - self.alpha * V_RTT - self.b * V_loss
+        print(f"[Env.reward] TP={V_throughput:.2f} KB, RTT={V_RTT*1000:.2f} ms, Loss={V_loss}, "
+      f"α={self.alpha}, β={self.b}, reward={reward:.2f}")
         print(f"[Env.reward]reward={reward:.3f}")
         return reward  # ← 返回正确计算的reward
         
