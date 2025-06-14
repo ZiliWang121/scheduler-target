@@ -46,6 +46,9 @@ class Online_Agent(threading.Thread):
         self.agent_name = cfg.get('nafcnn', 'agent')
         self.explore = explore
         self.max_flows = cfg.getint('env', 'max_num_subflows')
+        # 读取目标配置
+        self.target_tp = cfg.getfloat('env', 'target_tp') 
+        self.target_rtt = cfg.getfloat('env', 'target_rtt') 
         self.ounoise = OUNoise(action_dimension=self.max_flows)
         self.agent = torch.load(self.agent_name)
         mpsched.persist_state(fd)
@@ -55,7 +58,10 @@ class Online_Agent(threading.Thread):
                        alpha=self.cfg.getfloat('env', 'alpha'),
                        b=self.cfg.getfloat('env', 'b'),
                        c=self.cfg.getfloat('env', 'c'),
-                       max_flows=self.max_flows)
+                       max_flows=self.max_flows,
+                       # 添加对目标值的处理
+                       target_tp=self.target_tp,
+                       target_rtt=self.target_rtt)
         self.event = event
         # 改进2: 添加模型同步相关变量
         self.step_count = 0  # 记录执行了多少步
@@ -109,7 +115,7 @@ class Online_Agent(threading.Thread):
             k = self.cfg.getint('env', 'k')  # k=8
             # 改进4: 减少初始化日志的频率
             logging.info(
-                f"[Online Agent] Initial RTTs = {np.array(state)[self.max_flows:self.max_flows*2,7].tolist()}"
+                f"[Online Agent] Initial RTTs = {np.array(state)[self.max_flows:self.max_flows*2,-1].tolist()}"
             )
             state = torch.FloatTensor(state).view(-1, 1, k, 1)
             while True:
