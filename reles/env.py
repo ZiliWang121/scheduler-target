@@ -111,7 +111,7 @@ class Env():
         # V_loss = Σv_t,i (总重传包数)
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
         # 最终奖励
-        reward = - abs(target_tp - V_throughput) / target_tp
+        reward = - abs(target_tp - V_throughput)
         print(f"[Env.reward] TP={V_throughput:.2f} Mbps, reward={reward:.3f}")
         return reward  # ← 返回正确计算的reward
         
@@ -178,14 +178,15 @@ class Env():
         :rtype: list,float,boolean
         """
         
-        splits = []
+        splits = [10, 90]
         A = [self.fd]
         SCALE   = 100                           # 精度 1 %
-        
+        """
         for k in range(self.max_num_flows):
             #用softmax后已经不需要了：ratio   = max(0.0, (action[0][k]+1)/2)   # 连续 0‥1
             weight  = int(torch.round(action[0][k] * SCALE))     # 0‥100
             splits.append(weight)
+        """
         A = list(np.concatenate((A,splits)))
         print(f"[Env.step] Applied splits = {splits}")
         

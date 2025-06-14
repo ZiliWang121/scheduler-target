@@ -1,0 +1,1 @@
+cmd_/home/lifistud32/Desktop/scheduler-target/reles/kernel/mptcp_reles.mod := { echo  /home/lifistud32/Desktop/scheduler-target/reles/kernel/mptcp_reles.o;  echo; } > /home/lifistud32/Desktop/scheduler-target/reles/kernel/mptcp_reles.mod

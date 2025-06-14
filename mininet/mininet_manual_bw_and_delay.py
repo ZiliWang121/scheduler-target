@@ -70,7 +70,7 @@ def simple_dual_link_shared_switch():
     sta1.cmd('tc qdisc del dev sta1-eth1 root || true')
     # sta1-eth0: 高带宽低延迟
     sta1.cmd('tc qdisc add dev sta1-eth0 root handle 1: tbf rate 100mbit burst 15k latency 50ms')
-    sta1.cmd('tc qdisc add dev sta1-eth0 parent 1:1 handle 10: netem delay 5ms')
+    sta1.cmd('tc qdisc add dev sta1-eth0 parent 1:1 handle 10: netem delay 20ms')
     # sta1-eth1: 低带宽高延迟
     sta1.cmd('tc qdisc add dev sta1-eth1 root handle 1: tbf rate 20mbit burst 15k latency 50ms')
     sta1.cmd('tc qdisc add dev sta1-eth1 parent 1:1 handle 10: netem delay 20ms')

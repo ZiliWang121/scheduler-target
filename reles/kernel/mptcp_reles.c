@@ -283,7 +283,7 @@ found:
 			return NULL;
 			
 		if(choose_sk!=NULL)
-			pr_info("%d",choose_sk->__sk_common.skc_daddr);		
+			/* pr_info("%d",choose_sk->__sk_common.skc_daddr);		 */
 		
 		*subsk = choose_sk;
 		mss_now = tcp_current_mss(*subsk);
@@ -335,7 +335,7 @@ module_exit(reles_unregister);
 
 MODULE_AUTHOR("ME");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("reles demo scheduler for mptcp");
-MODULE_VERSION("0.90");
+MODULE_DESCRIPTION("reles scheduler for mptcp");
+MODULE_VERSION("0.91");
 
 
