@@ -43,12 +43,16 @@ class Policy(nn.Module):
 		self.lstm7 = nn.LSTM(1,self.hidden_lstm,2,batch_first=True)  #2 layers stacked LSTM
 		self.lstm8 = nn.LSTM(1,self.hidden_lstm,2,batch_first=True)  #2 layers stacked LSTM
 		self.lstm9 = nn.LSTM(1,self.hidden_lstm,2,batch_first=True)  #2 layers stacked LSTM
+		self.lstm10 = nn.LSTM(1,self.hidden_lstm,2,batch_first=True)  # target_tp
+		self.lstm11 = nn.LSTM(1,self.hidden_lstm,2,batch_first=True)  # target_rtt
 		
-		self.bn0 = nn.BatchNorm1d(self.hidden_lstm*10)
+		# 修改BatchNorm的维度
+		self.bn0 = nn.BatchNorm1d(self.hidden_lstm*12)
 		self.bn0.weight.data.fill_(1)
 		self.bn0.bias.data.fill_(0)
 		
-		self.linear1= nn.Linear(self.hidden_lstm*10, hidden_size)
+		# 修改第一个线性层的输入维度
+		self.linear1= nn.Linear(self.hidden_lstm*12, hidden_size)
 		self.bn1 = nn.BatchNorm1d(hidden_size)
 		self.bn1.weight.data.fill_(1)
 		self.bn1.bias.data.fill_(0)
@@ -106,8 +110,13 @@ class Policy(nn.Module):
 		x9 = x9[:,-1,:]
 		x10,_ = self.lstm9(x[9,:,:,:],(self.h0,self.c0))
 		x10 = x10[:,-1,:]
-		
-		x = torch.cat([x1,x2,x3,x4,x5,x6,x7,x8,x9,x10],dim=-1)
+		# 在forward方法中添加两个新LSTM的处理
+		x11,_ = self.lstm10(x[10,:,:,:],(self.h0,self.c0))
+		x11 = x11[:,-1,:]
+		x12,_ = self.lstm11(x[11,:,:,:],(self.h0,self.c0))
+		x12 = x12[:,-1,:]
+		# 修改torch.cat的拼接
+		x = torch.cat([x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12],dim=-1)
 
 		# 添加BatchNorm（这是唯一需要的修改）
 		x = self.bn0(x)

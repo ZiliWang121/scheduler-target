@@ -180,7 +180,7 @@ def main(argv):
         shutil.move(AGENT_FILE,"trained_models/agent"+start_train+".pkl")
     if not os.path.exists(AGENT_FILE) or CONTINUE_TRAIN != 1:
         agent = NAF_LSTM(gamma=cfg.getfloat('nafcnn','gamma'),tau=cfg.getfloat('nafcnn','tau'),
-        hidden_size=cfg.getint('nafcnn','hidden_size'),num_inputs=cfg.getint('env','k')*MAX_NUM_FLOWS*5,
+        hidden_size=cfg.getint('nafcnn','hidden_size'),num_inputs=cfg.getint('env','k')*12,
         action_space=MAX_NUM_FLOWS)
         torch.save(agent,AGENT_FILE)
 
