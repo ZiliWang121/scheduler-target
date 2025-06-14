@@ -17,7 +17,7 @@ class Env():
     :param beta: second parameter of reward function to scale number of loss packets (reflects network congetsion|min->favors less congested paths)
     :type beta: float
     """
-    def __init__(self,fd,time,k,alpha,b,c,max_flows):
+    def __init__(self,fd,time,k,alpha,b,c,max_flows,target_tp,target_rtt):
         """Constructor method
         """
         self.fd = fd
@@ -28,8 +28,11 @@ class Env():
         self.c = c
         self.num_segments = 10
         self.max_num_flows = max_flows
-        
-    
+        self.static_target_tp = target_tp
+        self.static_target_rtt = target_rtt
+        # 初始化目标序列
+        self.target_tp = []      # 全局吞吐量目标序列
+        self.target_rtt = []     # 全局RTT目标序列
         self.last = [[0]*5 for _ in range(self.max_num_flows)]
         self.tp = [[] for _ in range(self.max_num_flows)]        #num of segments out (MSS=1440B)
         self.rtt = [[] for _ in range(self.max_num_flows)]        #snapshot of rtt
@@ -37,7 +40,11 @@ class Env():
         self.cwnd = [[] for _ in range(self.max_num_flows)]        #cwnd sender
         self.rr = [[] for _ in range(self.max_num_flows)]        #number of unacked packets (in flight)
         self.in_flight = [[] for _ in range(self.max_num_flows)]    #number of TOTAL retransmissions
-        
+
+    def get_targets(self):
+        """获取当前目标值"""
+        return self.static_target_tp, self.static_target_rtt
+
     def adjust(self,state):
         """Converts the raw observations collected with mpsched socket api into appropriate values for state information and reward
         calculation
@@ -47,6 +54,11 @@ class Env():
         :return: State parameters
         :rtype: list
         """
+        # 1. 首先处理目标序列（全局的，只处理一次）
+        if len(self.target_tp) == self.k:
+            self.target_tp.pop(0)
+            self.target_rtt.pop(0)
+        # 2. 然后处理每个子流的序列
         for i in range(len(state)): #in range 2 if len sate < 2 etc.
             if len(self.tp[i]) == self.k:
                 self.tp[i].pop(0)
@@ -71,8 +83,12 @@ class Env():
             self.rr[i].append(np.abs(state[i][3]-self.last[i][3]))
             self.in_flight[i].append(np.abs(state[i][4]-self.last[i][4]))#look at wording in reles paper
         self.last = state
+        # 获取目标值并添加到全局目标序列
+        target_tp, target_rtt = self.get_targets()
+        self.target_tp.append(target_tp)
+        self.target_rtt.append(target_rtt)
         return [self.tp[0],self.tp[1],self.rtt[0],self.rtt[1],self.cwnd[0],self.cwnd[1],self.rr[0],self.rr[1],
-        self.in_flight[0],self.in_flight[1]]
+        self.in_flight[0],self.in_flight[1],self.target_tp,self.target_rtt]
         
     def reward(self):
         """Calculates the reward of the last SI using the ReLes reward function which consideres multiple QoS parameters
@@ -82,6 +98,8 @@ class Env():
         :return: Reward value
         :type: float
         """
+        # 获取目标值
+        target_tp, target_rtt = self.get_targets()
         V_throughput = self.tp[0][self.k-1] + self.tp[1][self.k-1]  # KB per SI 0.2s
         #rewards = ((self.tp[0][self.k-1])+(self.tp[1][self.k-1]))
         if V_throughput>0:
@@ -93,10 +111,8 @@ class Env():
         # V_loss = Σv_t,i (总重传包数)
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
         # 最终奖励
-        reward = V_throughput - self.alpha * V_RTT - self.b * V_loss
-        print(f"[Env.reward] TP={V_throughput:.2f} Mbps, RTT={V_RTT:.2f} ms, Loss={V_loss}, "
-      f"α={self.alpha}, β={self.b}, reward={reward:.2f}")
-        print(f"[Env.reward]reward={reward:.3f}")
+        reward = - abs(target_tp - V_throughput) / target_tp
+        print(f"[Env.reward] TP={V_throughput:.2f} Mbps, reward={reward:.3f}")
         return reward  # ← 返回正确计算的reward
         
     def reset(self):
@@ -133,8 +149,16 @@ class Env():
                 self.in_flight[j].append(np.abs(subs[j][4]-self.last[j][4]))
             self.last = subs
             time.sleep((self.time)/10) 
+        # 初始化目标序列：填充k个相同的目标值
+        target_tp, target_rtt = self.get_targets()
+        for _ in range(self.k):
+            if len(self.target_tp) == self.k:
+                self.target_tp.pop(0)
+                self.target_rtt.pop(0)
+            self.target_tp.append(target_tp)
+            self.target_rtt.append(target_rtt)
         return [self.tp[0],self.tp[1],self.rtt[0],self.rtt[1],self.cwnd[0],self.cwnd[1],self.rr[0],self.rr[1],
-        self.in_flight[0],self.in_flight[1]]
+        self.in_flight[0],self.in_flight[1],self.target_tp,self.target_rtt]
         
     def update_fd(self,fd):
         self.fd = fd
