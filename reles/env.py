@@ -82,18 +82,19 @@ class Env():
         :return: Reward value
         :type: float
         """
-        V_throughput = self.tp[0][self.k-1] + self.tp[1][self.k-1]
+        V_throughput = self.tp[0][self.k-1] + self.tp[1][self.k-1]  # KB per SI 0.2s
         #rewards = ((self.tp[0][self.k-1])+(self.tp[1][self.k-1]))
         if V_throughput>0:
             V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
                  self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput
         else:
             V_RTT = 0
+        V_throughput =  V_throughput * 8 / (self.time * 1000)  # Mbps
         # V_loss = Σv_t,i (总重传包数)
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
         # 最终奖励
         reward = V_throughput - self.alpha * V_RTT - self.b * V_loss
-        print(f"[Env.reward] TP={V_throughput:.2f} KB, RTT={V_RTT*1000:.2f} ms, Loss={V_loss}, "
+        print(f"[Env.reward] TP={V_throughput:.2f} Mbps, RTT={V_RTT:.2f} ms, Loss={V_loss}, "
       f"α={self.alpha}, β={self.b}, reward={reward:.2f}")
         print(f"[Env.reward]reward={reward:.3f}")
         return reward  # ← 返回正确计算的reward
