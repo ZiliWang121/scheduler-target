@@ -27,100 +27,59 @@ import random
 #structure and modulisation based on github.com/gaogogo/Experiment
 
 class MPTCPSender(threading.Thread):
-    """处理MPTCP连接和多文件发送的线程"""
-    def __init__(self, cfg, memory, file_list):
+    """处理单个MPTCP连接的发送线程"""
+    def __init__(self, cfg, memory, event, file_to_send):
         threading.Thread.__init__(self)
         self.cfg = cfg
         self.memory = memory
-        self.file_list = file_list  # 改为文件列表
+        self.event = event
+        self.file_to_send = file_to_send
         self.IP = cfg.get('receiver','ip')
         self.PORT = cfg.getint('receiver','port')
-        self.transfer_event = Event()
-        self.results = []  # 存储每个文件的传输结果
         
     def run(self):
-        """建立一次MPTCP连接，发送多个文件"""
+        """建立MPTCP连接并发送文件"""
         # 创建MPTCP socket
-        MPTCP_ENABLED = 42
+        MPTCP_ENABLED = 42  # 根据您的内核版本可能需要调整
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)  # 添加连接超时
         
-        # 启用MPTCP
+        # 启用MPTCP（如果系统支持）
         try:
             sock.setsockopt(socket.IPPROTO_TCP, MPTCP_ENABLED, 1)
         except:
             print("[Sender] Warning: Could not enable MPTCP")
         
         try:
-            # 建立连接
+            # 连接到接收端
             sock.connect((self.IP, self.PORT))
-            sock.settimeout(None)  # 连接后取消超时
             fd = sock.fileno()
             mpsched.persist_state(fd)
             
-            # 启动Online Agent（整个连接期间运行）
-            agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, 
-                               event=self.transfer_event)
+            # 启动Online Agent
+            agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, event=self.event)
             agent.start()
-            self.transfer_event.set()
+            self.event.set()
             
-            # 依次发送每个文件
-            for i, file_to_send in enumerate(self.file_list):
-                start_time = time.time()
-                
-                try:
-                    # 发送文件名
-                    filename_msg = f"FILE:{file_to_send}\n".encode('utf-8')
-                    sock.send(filename_msg)
-                    
-                    # 发送文件内容
-                    with open(file_to_send, 'rb') as f:
-                        while True:
-                            data = f.read(4096)
-                            if not data:
-                                break
-                            sock.sendall(data)
-                    
-                    end_time = time.time()
-                    completion_time = end_time - start_time
-                    
-                    self.results.append({
-                        'file': file_to_send,
-                        'completion_time': completion_time,
-                        'success': True
-                    })
-                    
-                    print(f"[Sender] File {i+1}/{len(self.file_list)} sent: {file_to_send} ({completion_time:.2f}s)")
-                    
-                    # 文件间短暂间隔
-                    time.sleep(0.2)
-                    
-                except Exception as e:
-                    print(f"[Sender] Error sending {file_to_send}: {e}")
-                    self.results.append({
-                        'file': file_to_send,
-                        'completion_time': 0,
-                        'success': False
-                    })
+            # 发送文件名
+            filename_msg = f"FILE:{self.file_to_send}\n".encode('utf-8')
+            sock.send(filename_msg)
             
-        except socket.timeout:
-            print("[Sender] Connection timeout")
-            for file_to_send in self.file_list:
-                self.results.append({
-                    'file': file_to_send,
-                    'completion_time': 0,
-                    'success': False
-                })
+            # 发送文件内容
+            with open(self.file_to_send, 'rb') as f:
+                while True:
+                    data = f.read(4096)
+                    if not data:
+                        break
+                    sock.sendall(data)
+                    time.sleep(0.001)
+            
+            # 等待一小段时间确保数据传输完成
+            #time.sleep(1)
+            
         except Exception as e:
-            print(f"[Sender] Connection error: {e}")
-            for file_to_send in self.file_list:
-                self.results.append({
-                    'file': file_to_send,
-                    'completion_time': 0,
-                    'success': False
-                })
+            print(f"[Sender] Error: {e}")
         finally:
-            self.transfer_event.clear()
+            self.event.clear()
             sock.close()
 
 def main(argv):
@@ -136,13 +95,10 @@ def main(argv):
     FILE = cfg.get('file','file')
     FILES = ["64kb.dat","2mb.dat","8mb.dat","64mb.dat"]
     
-    # 创建训练专用的event（永不清除）
-    training_event = Event()
-    training_event.set()
+    transfer_event = Event()
     CONTINUE_TRAIN = 1
-    num_iterations = 150
+    num_iterations = 2
     scenario = "default"
-    batch_size = 10  # 每批发送的文件数
     
     # 解析命令行参数
     if len(argv) >= 1:
@@ -153,14 +109,12 @@ def main(argv):
         FILE = argv[2]
     if len(argv) >= 4:
         num_iterations = int(argv[3])
-    if len(argv) >= 5:
-        batch_size = int(argv[4])  # 新增：批大小参数
         
     now = datetime.now().replace(microsecond=0)
     start_train = now.strftime("%Y-%m-%d %H:%M:%S")
     
     print(f"[Sender] Starting with args CONTINUE_TRAIN={CONTINUE_TRAIN}, scenario='{scenario}'")
-    print(f"[Sender] FILE={FILE}, iterations={num_iterations}, batch_size={batch_size}")
+    print(f"[Sender] FILE={FILE}, iterations={num_iterations}")
     
     # 加载或创建replay memory
     if os.path.exists(MEMORY_FILE) and CONTINUE_TRAIN:
@@ -181,100 +135,66 @@ def main(argv):
     if not os.path.exists(AGENT_FILE) or CONTINUE_TRAIN != 1:
         agent = NAF_LSTM(gamma=cfg.getfloat('nafcnn','gamma'),tau=cfg.getfloat('nafcnn','tau'),
         hidden_size=cfg.getint('nafcnn','hidden_size'),num_inputs=cfg.getint('env','k')*12,
-        action_space=MAX_NUM_FLOWS)
+        action_space=MAX_NUM_FLOWS) #5 is the size of state space (TP,RTT,CWND,unACK,retrans)
         torch.save(agent,AGENT_FILE)
 
-    # 初始化训练线程变量
-    off_agent = None
+    # 启动离线训练agent
+    off_agent = Offline_Agent(cfg=cfg,model=AGENT_FILE,memory=memory,event=transfer_event)
+    off_agent.daemon = True
     
-    # 用于保存性能指标
+    # 用于保存性能指标（类似原client.py）
     performance_metrics = []
     np.random.seed(42)
     
     try:
-        # 主循环：分批发送文件
-        total_files_sent = 0
-        batch_count = 0
-        
-        while total_files_sent < num_iterations:
-            batch_count += 1
-            
-            # 准备这一批要发送的文件
-            current_batch_size = min(batch_size, num_iterations - total_files_sent)
-            file_batch = []
-            
-            for i in range(current_batch_size):
-                # 选择要发送的文件
-                if FILE == "random" and num_iterations > 150:
-                    FILE2 = np.random.choice(FILES,p=[0, 0.9, 0, 0.1])
-                elif FILE == "random" and num_iterations == 150:
-                    FILE2 = np.random.choice(FILES,p=[0.3,0.35,0.3,0.05])
-                else:
-                    FILE2 = FILE
-                file_batch.append(FILE2)
-            
-            print(f"\n[Sender] Batch {batch_count}: Sending {len(file_batch)} files in one connection")
+        # 主循环：发送多个文件
+        for i in range(num_iterations):
+            # 选择要发送的文件（保留原client.py的逻辑）
+            if FILE == "random" and num_iterations > 150:
+                FILE2 = np.random.choice(FILES,p=[0, 0.9, 0, 0.1])
+            elif FILE == "random" and num_iterations == 150:
+                FILE2 = np.random.choice(FILES,p=[0.3,0.35,0.3,0.05])
+            else:
+                FILE2 = FILE
+                
+            print(f"\n[Sender] Iteration {i+1}/{num_iterations}, sending: {FILE2}")
             
             # 记录开始时间
-            batch_start_time = time.time()
+            start_time = time.time()
             
-            # 创建发送线程（一次连接发送多个文件）
-            sender = MPTCPSender(cfg, memory, file_batch)
+            # 创建发送线程
+            sender = MPTCPSender(cfg, memory, transfer_event, FILE2)
             sender.start()
-            sender.join(timeout=60)  # 60秒超时
-            
-            if sender.is_alive():
-                print(f"[Sender] Batch {batch_count} timeout, skipping")
-                total_files_sent += len(file_batch)
-                continue
+            sender.join()  # 等待发送完成
             
             # 记录结束时间
-            batch_end_time = time.time()
+            end_time = time.time()
+            completion_time = end_time - start_time
             
-            # 处理结果
-            for j, result in enumerate(sender.results):
-                iteration_num = total_files_sent + j + 1
+            # 计算性能指标
+            if FILE2.find("kb") != -1:
+                file_size = int(re.findall(r'\d+',FILE2)[0])/1000
+            else: 
+                file_size = int(re.findall(r'\d+',FILE2)[0])
                 
-                if result['success']:
-                    completion_time = result['completion_time']
-                    file_name = result['file']
-                    
-                    # 计算性能指标
-                    if file_name.find("kb") != -1:
-                        file_size = int(re.findall(r'\d+',file_name)[0])/1000
-                    else: 
-                        file_size = int(re.findall(r'\d+',file_name)[0])
-                        
-                    throughput = file_size/completion_time if completion_time > 0 else 0
-                    
-                    # 保存性能指标
-                    if iteration_num >= 30:
-                        performance_metrics.append({
-                            "iteration": iteration_num,
-                            "file": file_name,
-                            "completion time": completion_time,
-                            "throughput": throughput,
-                            "file_size_MB": file_size
-                        })
-                    
-                    print(f"[Sender] File {iteration_num}: {file_name} - {throughput:.2f} MB/s")
-                else:
-                    print(f"[Sender] File {iteration_num}: {result['file']} - FAILED")
+            throughput = file_size/completion_time if completion_time > 0 else 0
             
-            total_files_sent += len(file_batch)
+            # 保存性能指标（如果迭代次数>=30，类似原client.py）
+            if i >= 30:
+                performance_metrics.append({
+                    "iteration": i,
+                    "file": FILE2,
+                    "completion time": completion_time,
+                    "throughput": throughput,
+                    "file_size_MB": file_size
+                })
             
             # 检查是否需要启动离线训练
-            if len(memory) > BATCH_SIZE:
-                if off_agent is None or not off_agent.is_alive():
-                    off_agent = Offline_Agent(cfg=cfg, model=AGENT_FILE, 
-                                             memory=memory, event=training_event)
-                    off_agent.daemon = True
-                    off_agent.start()
-                    print(f"[Sender] Training started/restarted after batch {batch_count}")
-                    print(f"[Sender] Memory size: {len(memory)}")
-            
-            # 批次间间隔（给系统时间清理资源）
-            time.sleep(2)
+            if len(memory) > BATCH_SIZE and not off_agent.is_alive():
+                off_agent.start()
+                
+            # 短暂休息（类似原client.py）
+            # time.sleep(1)
             
         # 保存性能指标
         if performance_metrics:
@@ -284,10 +204,6 @@ def main(argv):
             
     except (KeyboardInterrupt, SystemExit):
         print("\n[Sender] Shutting down...")
-        training_event.clear()
-        if off_agent and off_agent.is_alive():
-            print("[Sender] Waiting for training thread to finish...")
-            off_agent.join(timeout=5)
     finally:
         # 保存replay memory
         with open(MEMORY_FILE,'wb') as f:

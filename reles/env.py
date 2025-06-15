@@ -178,7 +178,6 @@ class Env():
         :rtype: list,float,boolean
         """
         
-        splits = [10, 90]
         A = [self.fd]
         SCALE   = 100                           # 精度 1 %
         """
@@ -187,6 +186,7 @@ class Env():
             weight  = int(torch.round(action[0][k] * SCALE))     # 0‥100
             splits.append(weight)
         """
+        splits = [100, 0]
         A = list(np.concatenate((A,splits)))
         print(f"[Env.step] Applied splits = {splits}")
         
