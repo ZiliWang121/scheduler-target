@@ -67,11 +67,11 @@ class MPTCPSender(threading.Thread):
             # 发送文件内容
             with open(self.file_to_send, 'rb') as f:
                 while True:
-                    data = f.read(4096)
+                    data = f.read(8192)
                     if not data:
                         break
                     sock.sendall(data)
-                    time.sleep(0.001)
+                    #time.sleep(0.001)
             
             # 等待一小段时间确保数据传输完成
             #time.sleep(1)
