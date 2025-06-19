@@ -88,6 +88,9 @@ static PyObject* set_seg(PyObject* self,PyObject* args)
 		
 		segments[i-1] = (unsigned char)elem;
 	}
+	/*只加这一行*/ 
+    fprintf(stderr, "[DEBUG] Setting weights: sf0=%d, sf1=%d\n", segments[0], segments[1]);
+	fflush(stderr);
 	setsockopt(fd,SOL_TCP,MPTCP_SCHED_INFO,&sched_info,sizeof(sched_info));
 	
 	

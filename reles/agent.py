@@ -65,7 +65,7 @@ class Online_Agent(threading.Thread):
         self.event = event
         # 改进2: 添加模型同步相关变量
         self.step_count = 0  # 记录执行了多少步
-        self.model_sync_interval = 150  # 每50步重新加载一次模型
+        self.model_sync_interval = 50000  # 每50步重新加载一次模型
         self.last_model_mtime = os.path.getmtime(self.agent_name) if os.path.exists(self.agent_name) else 0 # 记录模型文件的最后修改时间
         # 改进3: 添加性能监控变量
         self.recent_rewards = []  # 存储最近的奖励值
@@ -183,9 +183,9 @@ class Offline_Agent(threading.Thread):
         self.event = event
         max_flows = cfg.getint("env", "max_num_subflows")
         # 改进10: 添加训练相关参数
-        self.training_frequency = 5  # 每次训练5个batch而不是1个
+        self.training_frequency = 1  # 每次训练5个batch而不是1个
         self.min_memory_size = self.batch_size * 2  # 最小内存要求
-        self.check_interval = 20  # 每20秒检查一次，而不是等60秒
+        self.check_interval = 60  # 每20秒检查一次，而不是等60秒
         self.save_interval = 200  # 每200次训练保存一次模型
         # 改进11: 添加训练监控变量
         self.training_step = 0

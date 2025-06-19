@@ -177,20 +177,23 @@ class Env():
         :return: state observation of the next state t+1,reward value and boolean indication whether bulk transfer is over 
         :rtype: list,float,boolean
         """
-        
+        splits = []
         A = [self.fd]
         SCALE   = 100                           # 精度 1 %
-        """
+        #" " "
         for k in range(self.max_num_flows):
             #用softmax后已经不需要了：ratio   = max(0.0, (action[0][k]+1)/2)   # 连续 0‥1
             weight  = int(torch.round(action[0][k] * SCALE))     # 0‥100
             splits.append(weight)
-        """
-        splits = [50, 50]
+        # " " "
+        #splits = [20, 80]
         A = list(np.concatenate((A,splits)))
         print(f"[Env.step] Applied splits = {splits}")
-        
+        # 只加这两行调试
+        #print(f"[DEBUG] Before set_seg: {A}")
         mpsched.set_seg(A)
+        #print(f"[DEBUG] set_seg returned: {result}")
+        #mpsched.set_seg(A)
         
         
         time.sleep(self.time)

@@ -81,6 +81,13 @@ def simple_dual_link_shared_switch():
     print("sta1 iperf3 -c 10.0.1.10 -B 10.0.1.1")
     print("sta1 ping -I 10.0.1.2 10.0.1.10")
     print("sta1 iperf3 -c 10.0.1.10 -B 10.0.1.2")
+    print("进入两个节点：")
+    print("sudo mnexec -a $(pgrep -f 'sta1') bash")
+    print("sudo mnexec -a $(pgrep -f 'h1') bash")
+    print("流量监测：")
+    print("进入两个节点：")
+    print("ifstat -i sta1-eth0,sta1-eth1")
+    
 
     CLI(net)
     net.stop()
