@@ -70,6 +70,11 @@ class Online_Agent(threading.Thread):
         # 改进3: 添加性能监控变量
         self.recent_rewards = []  # 存储最近的奖励值
         self.reward_window = 100  # 统计窗口大小
+        
+        # 【新增】：零带宽过滤相关变量
+        self.throughput_threshold = 0.5  # Mbps，吞吐量阈值，可根据需要调整
+        self.discarded_count = 0  # 记录丢弃的经验数量
+        self.valid_experience_count = 0  # 记录有效经验数量
 
     def _should_reload_model(self):
         """检查是否需要重新加载模型"""
@@ -137,9 +142,38 @@ class Online_Agent(threading.Thread):
                                 f"Chosen split action = {action}, "
                                 f"Action compute time = {end-start:.4f}")
                 state_nxt, reward, done = self.env.step((action))
-                # 改进7: 更新奖励统计
-                self._update_reward_stats(reward)
-                self._log_performance()
+                
+                # 【修改开始】：添加零带宽过滤逻辑
+                # 计算当前吞吐量 (Mbps)
+                current_tp = (self.env.tp[0][-1] + self.env.tp[1][-1]) * 8 / (self.env.time * 1000)
+                
+                # 只有吞吐量大于阈值才存储经验和更新统计
+                if current_tp > self.throughput_threshold:
+                    # 存储有效经验
+                    action_tensor = torch.FloatTensor(action)
+                    mask = torch.Tensor([not done])
+                    state_nxt_tensor = torch.FloatTensor(state_nxt).view(-1, 1, k, 1)
+                    reward_tensor = torch.FloatTensor([float(reward)])
+                    self.memory.push(state, action_tensor, mask, state_nxt_tensor, reward_tensor)
+                    
+                    # 更新有效经验的奖励统计
+                    self._update_reward_stats(reward)
+                    self._log_performance()
+                    self.valid_experience_count += 1
+                else:
+                    # 记录丢弃的经验
+                    self.discarded_count += 1
+                    
+                    # 定期报告过滤情况
+                    if self.step_count % 50 == 0:
+                        total_experiences = self.valid_experience_count + self.discarded_count
+                        discard_rate = (self.discarded_count / total_experiences * 100) if total_experiences > 0 else 0
+                        logging.info(f"[Online Agent] Experience filtering stats: "
+                                   f"Valid: {self.valid_experience_count}, "
+                                   f"Discarded: {self.discarded_count} ({discard_rate:.1f}%), "
+                                   f"Current TP: {current_tp:.3f} Mbps")
+                # 【修改结束】
+                
                 if done or not self.event.is_set():
                     logging.info(f"[Online Agent] Episode finished at step {self.step_count}")
                     break
@@ -147,12 +181,9 @@ class Online_Agent(threading.Thread):
                 if self.step_count % 20 == 0:
                     logging.debug(f"[Online Agent] Next RTTs = "
                                 f"{np.array(state_nxt)[self.max_flows:self.max_flows*2,-1].tolist()}")  
-                action = torch.FloatTensor(action)
-                mask = torch.Tensor([not done])
-                state_nxt = torch.FloatTensor(state_nxt).view(-1, 1, k, 1)
-                reward = torch.FloatTensor([float(reward)])
-                self.memory.push(state, action, mask, state_nxt, reward)
-                state = state_nxt
+                
+                # 【注意】：原来的存储逻辑已经移到上面的条件判断中，这里只需要更新状态
+                state = torch.FloatTensor(state_nxt).view(-1, 1, k, 1)
 
     def update_fd(self, fd):
         """Update the current file descriptor used in the Environment Class for reading information from subflows with socket options"""
