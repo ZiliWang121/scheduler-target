@@ -4,16 +4,17 @@
 #include <net/mptcp.h>
 
 static unsigned char num_segments __read_mostly = 1;
-module_param(num_segments, byte, 0644); //makes sure the module variable num_segments is changeable via sysctl or with socket option 46.
+module_param(num_segments, byte, 0644); // makes sure the module variable num_segments is changeable via sysctl or with socket option 46.
 MODULE_PARM_DESC(num_segments, "The number of consecutive segments that are part of a burst");
 
 static bool cwnd_limited __read_mostly = 1;
 module_param(cwnd_limited, bool, 0644);
 MODULE_PARM_DESC(cwnd_limited, "if set to 1, the scheduler tries to fill the congestion-window on all subflows");
 
-struct mysched_priv{
-  __u16 quota_byte;   /* 已发送字节数 (≤ weight)        */
-  __u16 weight;       /* 目标配额，0‥100 × MSS          */
+struct mysched_priv
+{
+	__u16 quota_byte; /* 已发送字节数 (≤ weight)        */
+	__u16 weight;	  /* 目标配额，0‥100 × MSS          */
 };
 
 static struct mysched_priv *mysched_get_priv(const struct tcp_sock *tp)
@@ -26,7 +27,7 @@ static struct mysched_priv *mysched_get_priv(const struct tcp_sock *tp)
 
 /* If the sub-socket sk available to send the skb?*/
 static bool mptcp_reles_is_available(const struct sock *sk, const struct sk_buff *skb,
-				  bool zero_wnd_test, bool cwnd_test)
+									 bool zero_wnd_test, bool cwnd_test)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int space, in_flight;
@@ -44,7 +45,8 @@ static bool mptcp_reles_is_available(const struct sock *sk, const struct sk_buff
 	if (tp->pf)
 		return false;
 
-	if (inet_csk(sk)->icsk_ca_state == TCP_CA_Loss) {
+	if (inet_csk(sk)->icsk_ca_state == TCP_CA_Loss)
+	{
 		/* If SACK is disabled, and we got a loss, TCP does not exit
 		 * the loss-state until something above high_seq has been acked.
 		 * (see tcp_try_undo_recovery)
@@ -59,10 +61,11 @@ static bool mptcp_reles_is_available(const struct sock *sk, const struct sk_buff
 			return false;
 	}
 
-	if (!tp->mptcp->fully_established) {
+	if (!tp->mptcp->fully_established)
+	{
 		/* Make sure that we send in-order data */
 		if (skb && tp->mptcp->second_packet &&
-		    tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
+			tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
 			return false;
 	}
 
@@ -96,60 +99,68 @@ static int mptcp_reles_dont_reinject_skb(const struct tcp_sock *tp, const struct
 	 * another one.
 	 */
 	return skb &&
-		/* Has the skb already been enqueued into this subsocket? */
-		mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask;
+		   /* Has the skb already been enqueued into this subsocket? */
+		   mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask;
 }
 
 /* We just look for any subflow that is available */
 static struct sock *reles_get_available_subflow(struct sock *meta_sk,
-					     struct sk_buff *skb,
-					     bool zero_wnd_test)
+												struct sk_buff *skb,
+												bool zero_wnd_test)
 {
 	const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 	struct sock *sk = NULL, *bestsk = NULL, *backupsk = NULL;
 	struct mptcp_tcp_sock *mptcp;
-	
+
 	/* Answer data_fin on same subflow!!! */
 	if (meta_sk->sk_shutdown & RCV_SHUTDOWN &&
-	    skb && mptcp_is_data_fin(skb)) {
-		mptcp_for_each_sub(mpcb, mptcp) {
+		skb && mptcp_is_data_fin(skb))
+	{
+		mptcp_for_each_sub(mpcb, mptcp)
+		{
 			sk = mptcp_to_sock(mptcp);
 			if (tcp_sk(sk)->mptcp->path_index == mpcb->dfin_path_index &&
-			    mptcp_reles_is_available(sk, skb, zero_wnd_test, true))
+				mptcp_reles_is_available(sk, skb, zero_wnd_test, true))
 				return sk;
 		}
 	}
-	mptcp_for_each_sub(mpcb, mptcp) {
+	mptcp_for_each_sub(mpcb, mptcp)
+	{
 		struct tcp_sock *tp;
 		struct mysched_priv *msp;
-		
+
 		sk = mptcp_to_sock(mptcp);
 		tp = tcp_sk(sk);
 		msp = mysched_get_priv(tp);
-		
-		//if num_segments == 0 we dont want to use the subflow at all even if it is available
-		if(msp->weight == 0){
+
+		// if num_segments == 0 we dont want to use the subflow at all even if it is available
+		if (msp->weight == 0)
+		{
 			continue;
 		}
-		
-		if (!mptcp_reles_is_available(sk, skb, zero_wnd_test, true)){
+
+		if (!mptcp_reles_is_available(sk, skb, zero_wnd_test, true))
+		{
 			continue;
 		}
-		
-		if (mptcp_reles_dont_reinject_skb(tp, skb)) {
+
+		if (mptcp_reles_dont_reinject_skb(tp, skb))
+		{
 			backupsk = sk;
 			continue;
 		}
 
 		bestsk = sk;
-		
 	}
 
-	if (bestsk) {
+	if (bestsk)
+	{
 		sk = bestsk;
-	} else if (backupsk) {
+	}
+	else if (backupsk)
+	{
 		// It has been sent on all subflows once - let's give it a
-		 // chance again by restarting its pathmask.
+		// chance again by restarting its pathmask.
 		if (skb)
 			TCP_SKB_CB(skb)->path_mask = 0;
 		sk = backupsk;
@@ -186,15 +197,15 @@ static struct sk_buff *__mptcp_reles_next_segment(const struct sock *meta_sk, in
 }
 
 static struct sk_buff *mptcp_reles_next_segment(struct sock *meta_sk,
-					     int *reinject,
-					     struct sock **subsk,
-					     unsigned int *limit)
+												int *reinject,
+												struct sock **subsk,
+												unsigned int *limit)
 {
 	const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 	struct mptcp_tcp_sock *mptcp;
 	struct sock *choose_sk = NULL;
 	struct sk_buff *skb = __mptcp_reles_next_segment(meta_sk, reinject);
-	unsigned char split = 1,max_space=0;    //difference to rr!
+	unsigned char split = 1, max_space = 0; // difference to rr!
 	unsigned char iter = 0, full_subs = 0;
 
 	/* As we set it, we have to reset it as well. */
@@ -203,7 +214,8 @@ static struct sk_buff *mptcp_reles_next_segment(struct sock *meta_sk,
 	if (!skb)
 		return NULL;
 
-	if (*reinject) {
+	if (*reinject)
+	{
 		*subsk = reles_get_available_subflow(meta_sk, skb, false);
 		if (!*subsk)
 			return NULL;
@@ -212,54 +224,59 @@ static struct sk_buff *mptcp_reles_next_segment(struct sock *meta_sk,
 	}
 
 retry:
-  choose_sk = NULL;
-  split = 0;
-  iter = 0; 
-  full_subs = 0; 
+	choose_sk = NULL;
+	split = 0;
+	iter = 0;
+	full_subs = 0;
 	/* First, we look for a subflow who is currently being used */
-	mptcp_for_each_sub(mpcb, mptcp) {
-	        
+	mptcp_for_each_sub(mpcb, mptcp)
+	{
+
 		struct sock *sk_it = mptcp_to_sock(mptcp);
 		struct tcp_sock *tp_it = tcp_sk(sk_it);
 		struct mysched_priv *msp = mysched_get_priv(tp_it);
-		
+
 		if (!mptcp_reles_is_available(sk_it, skb, false, cwnd_limited))
 			continue;
-		//skip subfows with num_segments = 0	
-		if(msp->weight == 0){
+		// skip subfows with num_segments = 0
+		if (msp->weight == 0)
+		{
 			if (msp->weight == 0)
 				continue;
-		}	
+		}
 
 		iter++;
-		
-		
+
 		/* Is this subflow currently being used? */
 		if (msp->weight && (msp->quota_byte < msp->weight) &&
-      (msp->weight - msp->quota_byte > split)) {
-			split = msp->weight - msp->quota_byte;   /* 剩余配额(字节) */
-			if(max_space < split){
-				choose_sk = sk_it; 
+			(msp->weight - msp->quota_byte > split))
+		{
+			split = msp->weight - msp->quota_byte; /* 剩余配额(字节) */
+			if (max_space < split)
+			{
+				choose_sk = sk_it;
 				max_space = split;
 			}
 		}
-		
+
 		/* Or, it must then be fully used  */
 		if (msp->quota_byte >= msp->weight)
 			full_subs++;
 	}
 
-  if (choose_sk != NULL) //changed so that we now only go to found if we actually found a subflow
-    goto found;
+	if (choose_sk != NULL) // changed so that we now only go to found if we actually found a subflow
+		goto found;
 	/* All considered subflows have a full quota, and we considered at
 	 * least one.
 	 * For ReLes only reset if quota of both paths is filled ?
 	 */
-	if (iter && (iter == full_subs)) {
+	if (iter && (iter == full_subs))
+	{
 		/* So, we restart this round by setting quota to 0 and retry
 		 * to find a subflow.
 		 */
-		mptcp_for_each_sub(mpcb, mptcp) {
+		mptcp_for_each_sub(mpcb, mptcp)
+		{
 			struct sock *sk_it = mptcp_to_sock(mptcp);
 			struct tcp_sock *tp_it = tcp_sk(sk_it);
 			struct mysched_priv *msp = mysched_get_priv(tp_it);
@@ -267,29 +284,46 @@ retry:
 			if (!mptcp_reles_is_available(sk_it, skb, false, cwnd_limited))
 				continue;
 			msp->quota_byte = 0;
-			
 		}
 
 		goto retry;
 	}
 
 found:
-	if (choose_sk) {
+	if (choose_sk)
+	{
 		unsigned int mss_now;
 		struct tcp_sock *choose_tp = tcp_sk(choose_sk);
 		struct mysched_priv *msp = mysched_get_priv(choose_tp);
 
 		if (!mptcp_reles_is_available(choose_sk, skb, false, true))
 			return NULL;
-			
-		if(choose_sk!=NULL)
-			/* pr_info("%d",choose_sk->__sk_common.skc_daddr);		 */
-		
+
+		// ===== 在这里添加内存调试代码 =====
+		unsigned char *raw = (unsigned char *)msp;
+		// 按kernel patch格式解读
+		unsigned char patch_quota = raw[0];
+		unsigned char patch_segments = raw[1];
+
+		printk(KERN_INFO "MEMORY_DEBUG[%d]: raw=[%02x,%02x,%02x,%02x]\n",
+			   raw[0], raw[1], raw[2], raw[3]);
+		printk(KERN_INFO "PATCH_VIEW[%d]: quota=%u, num_segments=%u\n",
+			   patch_quota, patch_segments);
+		printk(KERN_INFO "SCHED_VIEW[%d]: quota_byte=%u, weight=%u\n",
+			   msp->quota_byte, msp->weight);
+
+		// ===== 调试代码结束 =====
+		/*if(choose_sk!=NULL) */
+		/* pr_info("%d",choose_sk->__sk_common.skc_daddr);		 */
 		*subsk = choose_sk;
 		mss_now = tcp_current_mss(*subsk);
-		
+		// ===== 在这里添加调试代码 =====
+		printk(KERN_INFO "RELES_DEBUG: weight=%u, quota=%u, split=%u, mss=%u\n",
+			   msp->weight, msp->quota_byte, split, mss_now);
+		// ===== 调试代码结束 =====
 		*limit = min_t(u32, split, mss_now); /* 一次 ≤ 剩余配额 */
-        msp->quota_byte += skb->len;         /* 按字节记账 */
+		printk(KERN_INFO "RELES_FINAL: limit=%u\n", *limit);
+		msp->quota_byte += skb->len; /* 按字节记账 */
 
 		return skb;
 	}
@@ -297,26 +331,25 @@ found:
 	return NULL;
 }
 
-
 static void relessched_init(struct sock *sk)
 {
-  struct mysched_priv* priv = mysched_get_priv(tcp_sk(sk));
-  priv->weight      = num_segments; /* 初始=模块参数 */
-  priv->quota_byte  = 0;
+	struct mysched_priv *priv = mysched_get_priv(tcp_sk(sk));
+	priv->weight = num_segments; /* 初始=模块参数 */
+	priv->quota_byte = 0;
 }
 
 static struct mptcp_sched_ops mptcp_sched_reles = {
 	.get_subflow = reles_get_available_subflow,
 	.next_segment = mptcp_reles_next_segment,
-  	.init = relessched_init,
+	.init = relessched_init,
 	.name = "reles",
 	.owner = THIS_MODULE,
 };
- 
+
 static int __init reles_register(void)
 {
 	BUILD_BUG_ON(sizeof(struct mysched_priv) > MPTCP_SCHED_SIZE);
-	
+
 	printk(KERN_INFO "relessched_priv is loaded\n");
 
 	if (mptcp_register_scheduler(&mptcp_sched_reles))
@@ -335,7 +368,5 @@ module_exit(reles_unregister);
 
 MODULE_AUTHOR("ME");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("reles scheduler for mptcp");
-MODULE_VERSION("0.91");
-
-
+MODULE_DESCRIPTION("reles scheduler for mptcp -- debug ver");
+MODULE_VERSION("0.92");
