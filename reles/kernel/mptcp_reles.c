@@ -322,7 +322,7 @@ retry:
 			if (msp->num_segments > 0) {
 				msp->quota_byte = 0;
 				/* Softmax优化：重新计算配额，确保使用最新的RL设置 */
-				msp->weight_bytes = (msp->num_segments * 10000) / 100;
+				msp->weight_bytes = (msp->num_segments * SOFTMAX_QUOTA_BASE) / 100;
 			}
 		}
 
@@ -363,7 +363,7 @@ found:
 		 * 新策略：允许发送多个包，但不超过剩余配额
 		 * 这样既提高了效率，又保持了RL控制的精确性
 		 */
-		__u32 max_packets = min_t(__u32, best_remaining / mss_now, 8);  /* 最多8个包，避免过大burst */
+		__u32 max_packets = min_t(__u32, best_remaining / mss_now, 16);  /* 最多8个包，避免过大burst */
 		if (max_packets == 0) max_packets = 1;  /* 至少发送1个包 */
 		*limit = max_packets * mss_now;
 		
