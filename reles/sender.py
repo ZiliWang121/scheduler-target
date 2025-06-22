@@ -23,7 +23,6 @@ import shutil
 import pandas as pd
 import re
 import random
-import struct  # 【新增】用于打包/解包二进制数据
 
 #structure and modulisation based on github.com/gaogogo/Experiment
 
@@ -40,15 +39,16 @@ class MPTCPSender(threading.Thread):
         self.results = []  # 存储每个文件的传输结果
         
         # 【新增】延迟测量相关属性
-        self.delay_measurements = []  # 存储格式: [(delay_ms, received_timestamp), ...]
+        self.delay_measurements = []  # 存储[(delay_ms, received_timestamp), ...]
         self.delay_lock = threading.Lock()  # 线程安全锁
         self.probe_sequence = 0  # 探测包序号
         self.probe_interval = 0.05  # 50ms发送一次探测包
         self.pending_probes = {}  # 记录已发送但未收到回复的探测包: {seq: sent_timestamp}
+        self.delay_active = False  # 控制延迟测量线程
         
-    # 【新增】获取最近延迟数据的接口，供Env调用
     def get_recent_delays(self, window_ms=150):
-        """获取最近window_ms毫秒内收到的延迟测量
+        """
+        获取最近window_ms毫秒内收到的延迟测量，供Env调用
         
         Args:
             window_ms: 时间窗口，默认150ms（避免跨action的数据污染）
@@ -67,37 +67,49 @@ class MPTCPSender(threading.Thread):
             
         return recent_delays
     
-    # 【新增】延迟探测工作线程
     def delay_probe_worker(self, sock):
-        """每50ms发送一次延迟探测包的工作线程
-        
-        Args:
-            sock: MPTCP socket对象
+        """
+        每50ms在MPTCP连接中发送一次延迟探测包的工作线程
         """
         print("[Sender] Delay probe worker started")
         
-        while self.transfer_event.is_set():
+        # 等待传输开始后再开始探测
+        while not self.transfer_event.is_set():
+            time.sleep(0.1)
+        
+        # 等待1秒让连接稳定
+        time.sleep(1.0)
+        
+        self.delay_active = True
+        probe_count = 0
+        max_probes = 1000  # 最多发送1000个探测包
+        
+        while self.transfer_event.is_set() and self.delay_active and probe_count < max_probes:
             try:
-                # 构造探测包: "DELAY_PROBE:" + 时间戳(8字节) + 序号(4字节) + ":END_PROBE"
+                # 构造探测包: PING:timestamp_ms:sequence\n
                 sent_timestamp = time.time()
-                timestamp_us = int(sent_timestamp * 1000000)  # 转换为微秒精度
+                timestamp_ms = int(sent_timestamp * 1000)  # 毫秒时间戳
                 
-                # 打包二进制数据: ! = 网络字节序, Q = 8字节无符号整数, I = 4字节无符号整数
-                probe_data = struct.pack('!QI', timestamp_us, self.probe_sequence)
-                probe_packet = b'DELAY_PROBE:' + probe_data + b':END_PROBE'
+                probe_msg = f"PING:{timestamp_ms}:{self.probe_sequence}\n"
+                probe_data = probe_msg.encode('utf-8')
                 
                 # 记录发送的探测包
                 with self.delay_lock:
                     self.pending_probes[self.probe_sequence] = sent_timestamp
-                    # 避免内存泄漏：删除超过10秒未回复的探测包
-                    timeout_threshold = sent_timestamp - 10.0
+                    # 避免内存泄漏：删除超过3秒未回复的探测包
+                    timeout_threshold = sent_timestamp - 3.0
                     timeout_seqs = [seq for seq, ts in self.pending_probes.items() if ts < timeout_threshold]
                     for seq in timeout_seqs:
                         del self.pending_probes[seq]
                 
-                # 发送探测包
-                sock.send(probe_packet)
+                # 在MPTCP连接中发送探测包
+                sock.send(probe_data)
                 self.probe_sequence += 1
+                probe_count += 1
+                
+                # 每100个探测包打印一次状态
+                if probe_count % 100 == 0:
+                    print(f"[Sender] Sent {probe_count} delay probes, pending: {len(self.pending_probes)}")
                 
                 # 等待50ms后发送下一个
                 time.sleep(self.probe_interval)
@@ -106,22 +118,23 @@ class MPTCPSender(threading.Thread):
                 print(f"[Sender] Probe send error: {e}")
                 break
                 
-        print("[Sender] Delay probe worker stopped")
+        print(f"[Sender] Delay probe worker stopped after {probe_count} probes")
+        self.delay_active = False
     
-    # 【新增】延迟回复接收工作线程  
     def delay_reply_worker(self, sock):
-        """接收并处理延迟回复包的工作线程
-        
-        Args:
-            sock: MPTCP socket对象
+        """
+        接收并处理延迟回复包的工作线程
         """
         print("[Sender] Delay reply worker started")
         
-        # 设置socket为非阻塞模式，避免影响文件传输
+        # 设置socket为短超时，避免阻塞文件传输
+        original_timeout = sock.gettimeout()
         sock.settimeout(0.1)  # 100ms超时
-        buffer = b""
         
-        while self.transfer_event.is_set():
+        buffer = b""
+        reply_count = 0
+        
+        while self.transfer_event.is_set() and self.delay_active:
             try:
                 # 尝试接收数据
                 data = sock.recv(1024)
@@ -130,71 +143,69 @@ class MPTCPSender(threading.Thread):
                     
                 buffer += data
                 
-                # 在buffer中查找完整的回复包
-                while b'DELAY_REPLY:' in buffer and b':END_REPLY' in buffer:
-                    start = buffer.find(b'DELAY_REPLY:')
-                    end = buffer.find(b':END_REPLY', start)
+                # 在buffer中查找完整的回复行
+                while b'\n' in buffer:
+                    line_end = buffer.find(b'\n')
+                    line = buffer[:line_end].decode('utf-8', errors='ignore')
+                    buffer = buffer[line_end + 1:]
                     
-                    if end != -1:
-                        # 提取完整的回复包
-                        reply_packet = buffer[start:end+10]  # +10 是":END_REPLY"的长度
-                        buffer = buffer[end+10:]  # 剩余数据继续处理
+                    # 检查是否是PONG回复
+                    if line.startswith('PONG:'):
+                        self.handle_delay_reply(line)
+                        reply_count += 1
                         
-                        # 处理这个回复包
-                        self.handle_delay_reply(reply_packet)
-                    else:
-                        break  # 数据不完整，等待更多数据
+                        # 每20次回复打印一次统计
+                        if reply_count % 20 == 0:
+                            recent = self.get_recent_delays(window_ms=150)
+                            if recent:
+                                avg_delay = sum(recent) / len(recent)
+                                print(f"[Sender] Received {reply_count} replies, recent avg delay: {avg_delay:.1f}ms")
                         
             except socket.timeout:
                 # 超时是正常的，继续循环
                 continue
             except Exception as e:
-                # 其他错误可能是连接断开
                 print(f"[Sender] Reply receive error: {e}")
                 break
                 
-        print("[Sender] Delay reply worker stopped")
+        # 恢复原始超时设置
+        if original_timeout is not None:
+            sock.settimeout(original_timeout)
+        print(f"[Sender] Delay reply worker stopped, processed {reply_count} replies")
     
-    # 【新增】处理收到的延迟回复包
-    def handle_delay_reply(self, reply_packet):
-        """解析延迟回复包并计算延迟
+    def handle_delay_reply(self, reply_line):
+        """
+        解析延迟回复行并计算延迟
         
         Args:
-            reply_packet: 格式为 b'DELAY_REPLY:' + 数据 + b':END_REPLY'
+            reply_line: 格式为 "PONG:timestamp_ms:sequence"
         """
         try:
-            # 提取数据部分 (去掉前缀"DELAY_REPLY:"和后缀":END_REPLY")
-            payload = reply_packet[12:-10]  # 12="DELAY_REPLY:"长度, 10=":END_REPLY"长度
-            
-            # 解包数据: 时间戳(8字节) + 序号(4字节)
-            sent_timestamp_us, sequence = struct.unpack('!QI', payload)
-            sent_timestamp = sent_timestamp_us / 1000000.0  # 转换回秒
-            received_timestamp = time.time()
-            
-            # 计算延迟(毫秒)
-            delay_ms = (received_timestamp - sent_timestamp) * 1000
-            
-            with self.delay_lock:
-                # 验证这个回复对应的探测包确实发送过
-                if sequence in self.pending_probes:
-                    del self.pending_probes[sequence]  # 移除pending记录
-                    
-                    # 存储延迟测量结果
-                    self.delay_measurements.append((delay_ms, received_timestamp))
-                    
-                    # 保持最近100次测量，避免内存无限增长
-                    if len(self.delay_measurements) > 100:
-                        self.delay_measurements.pop(0)
+            parts = reply_line.split(':')
+            if len(parts) >= 3:
+                timestamp_ms = int(parts[1])
+                sequence = int(parts[2])
+                
+                sent_timestamp = timestamp_ms / 1000.0
+                received_timestamp = time.time()
+                
+                # 计算延迟(毫秒)
+                delay_ms = (received_timestamp - sent_timestamp) * 1000
+                
+                with self.delay_lock:
+                    # 验证这个回复对应的探测包确实发送过
+                    if sequence in self.pending_probes:
+                        del self.pending_probes[sequence]  # 移除pending记录
                         
-                    # 每10次测量打印一次统计
-                    if len(self.delay_measurements) % 10 == 0:
-                        recent = self.get_recent_delays(window_ms=150)
-                        if recent:
-                            avg_delay = sum(recent) / len(recent)
-                            print(f"[Sender] Delay stats: {len(recent)} samples in 150ms, avg={avg_delay:.1f}ms")
+                        # 存储延迟测量结果
+                        self.delay_measurements.append((delay_ms, received_timestamp))
+                        
+                        # 保持最近100次测量，避免内存无限增长
+                        if len(self.delay_measurements) > 100:
+                            self.delay_measurements.pop(0)
                             
-        except Exception as e:
-            print(f"[Sender] Reply parse error: {e}")
+        except (ValueError, IndexError) as e:
+            print(f"[Sender] Invalid PONG format: {reply_line}, error: {e}")
         
     def run(self):
         """建立一次MPTCP连接，发送多个文件"""
@@ -216,20 +227,20 @@ class MPTCPSender(threading.Thread):
             fd = sock.fileno()
             mpsched.persist_state(fd)
             
-            # 【新增】启动延迟探测相关线程
-            probe_thread = threading.Thread(target=self.delay_probe_worker, args=(sock,))
-            probe_thread.daemon = True  # 守护线程，主线程结束时自动结束
-            probe_thread.start()
-            
-            reply_thread = threading.Thread(target=self.delay_reply_worker, args=(sock,))
-            reply_thread.daemon = True
-            reply_thread.start()
-            
             # 【修改】启动Online Agent，传递sender引用
             agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, 
                                event=self.transfer_event, sender=self)  # 传递self引用
             agent.start()
             self.transfer_event.set()
+            
+            # 【新增】启动延迟测量相关线程
+            probe_thread = threading.Thread(target=self.delay_probe_worker, args=(sock,))
+            probe_thread.daemon = True
+            probe_thread.start()
+            
+            reply_thread = threading.Thread(target=self.delay_reply_worker, args=(sock,))
+            reply_thread.daemon = True
+            reply_thread.start()
             
             # 依次发送每个文件
             for i, file_to_send in enumerate(self.file_list):
@@ -240,7 +251,7 @@ class MPTCPSender(threading.Thread):
                     filename_msg = f"FILE:{file_to_send}\n".encode('utf-8')
                     sock.send(filename_msg)
                     
-                    # 发送文件内容
+                    # 发送文件内容 - 与延迟探测包共享同一连接
                     with open(file_to_send, 'rb') as f:
                         while True:
                             data = f.read(4096)
@@ -287,7 +298,10 @@ class MPTCPSender(threading.Thread):
                     'success': False
                 })
         finally:
+            # 【新增】正确清理资源
+            self.delay_active = False
             self.transfer_event.clear()
+            time.sleep(0.2)  # 等待线程结束
             sock.close()
 
 def main(argv):

@@ -16,8 +16,8 @@ class Env():
     :type alpha: float
     :param beta: second parameter of reward function to scale number of loss packets (reflects network congetsion|min->favors less congested paths)
     :type beta: float
-    :param sender: 【新增】MPTCPSender引用，用于获取延迟测量数据
-    :type sender: MPTCPSender or None
+    :param sender: 【新增】sender对象引用，用于获取延迟测量
+    :type sender: MPTCPSender
     """
     def __init__(self,fd,time,k,alpha,b,c,max_flows,target_tp,target_rtt,sender=None):  # 【修改】添加sender参数
         """Constructor method
@@ -51,10 +51,8 @@ class Env():
         self.meta_measurement_count = 0  # meta测量次数计数
         
         # 【新增】：延迟测量相关
-        self.sender = sender  # MPTCPSender引用，用于获取延迟数据
-        
-        # 【新增】：延迟reward的权重配置
-        self.delay_weight = 0.1  # 延迟在reward中的权重，可调节
+        self.sender = sender  # 对sender的引用，用于获取延迟测量
+        self.delay_weight = 0.3  # 延迟在reward中的权重，可根据需要调整
 
     def get_targets(self):
         """获取当前目标值"""
@@ -148,11 +146,12 @@ class Env():
         
     def reward(self):
         """
-        【重要修改】：基于meta层面的mptcpi_bytes_acked计算真实application throughput
-        【新增功能】：加入基于实测延迟的reward计算
+        【重要修改】：改进reward函数
+        1. 基于meta层面的mptcpi_bytes_acked计算真实application throughput
+        2. 集成PING-PONG测量的真实端到端延迟
         
-        原逻辑：只考虑吞吐量 reward = -abs(target_tp - actual_tp)
-        新逻辑：同时考虑吞吐量和延迟 reward = throughput_reward + delay_reward
+        原逻辑：基于子流segments out的瞬时发送吞吐量 + 基于子流加权RTT
+        新逻辑：基于meta层面确认字节数的确认吞吐量 + 基于PING-PONG的真实端到端延迟
         
         :return: Reward value
         :type: float
@@ -160,7 +159,7 @@ class Env():
         # 获取目标值
         target_tp, target_rtt = self.get_targets()
         
-        # 【保持原有】：计算吞吐量
+        # 【关键修改1】：改用meta层面的确认吞吐量计算
         if self.last_bytes_acked > 0 and self.current_bytes_acked >= self.last_bytes_acked:
             # 计算在这个SI期间确认的字节数增量
             bytes_acked_delta = self.current_bytes_acked - self.last_bytes_acked
@@ -170,40 +169,80 @@ class Env():
             # 如果是第一次测量或者数据异常，回退到原有计算方式
             V_throughput_segments = self.tp[0][self.k-1] + self.tp[1][self.k-1]  # KB per SI
             V_throughput = V_throughput_segments * 8 / (self.time * 1000)  # Mbps
-            print(f"[Env.reward] Using fallback calculation (segments-based)")
+            if self.meta_measurement_count % 10 == 0:  # 偶尔提示回退
+                print(f"[Env.reward] Using fallback throughput calculation")
         
-        # 【新增】：计算实测延迟
-        measured_rtt = target_rtt  # 默认值：使用目标延迟
-        delay_sample_count = 0
-        
-        if self.sender:
-            # 从sender获取最近150ms的延迟测量
-            recent_delays = self.sender.get_recent_delays(window_ms=150)
-            if len(recent_delays) >= 2:  # 至少需要2个测量点才可靠
-                measured_rtt = sum(recent_delays) / len(recent_delays)
-                delay_sample_count = len(recent_delays)
-            # 如果没有足够的延迟数据，就使用目标值（保持原有行为）
-        
-        # 【修改】：计算综合reward = 吞吐量reward + 延迟reward
-        throughput_penalty = abs(target_tp - V_throughput)  # 吞吐量偏差
-        delay_penalty = abs(target_rtt - measured_rtt)      # 延迟偏差
-        
-        # 综合reward：两个部分都是惩罚项（越小越好），所以都是负值
-        throughput_reward = -throughput_penalty
-        delay_reward = -delay_penalty * self.delay_weight  # 延迟权重较小
-        
-        total_reward = throughput_reward + delay_reward
-        
-        # 【增强的调试信息】：显示新的reward计算过程
-        if self.meta_measurement_count % 5 == 0:  # 每5次计算显示一次详细信息
-            segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
-            print(f"[Env.reward] TP={V_throughput:.2f}Mbps(target={target_tp:.2f}), "
-                  f"RTT={measured_rtt:.1f}ms(target={target_rtt:.1f}, samples={delay_sample_count}), "
-                  f"reward={total_reward:.3f}(tp:{throughput_reward:.3f}+delay:{delay_reward:.3f})")
+        # 【关键修改2】：使用PING-PONG测量的真实端到端延迟
+        V_RTT = self._calculate_ping_delay()
+        if V_RTT is None:
+            # 如果没有PING延迟数据，回退到原有基于子流的加权RTT计算
+            V_throughput_segments = self.tp[0][self.k-1] + self.tp[1][self.k-1]
+            if V_throughput_segments > 0:
+                V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
+                         self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput_segments
+            else:
+                V_RTT = 0
+            if self.meta_measurement_count % 20 == 0:  # 偶尔提示回退
+                print(f"[Env.reward] Using fallback RTT calculation: {V_RTT:.3f}s")
         else:
-            print(f"[Env.reward] TP={V_throughput:.2f}Mbps, RTT={measured_rtt:.1f}ms, reward={total_reward:.3f}")
+            # 转换延迟单位：ms -> s
+            V_RTT = V_RTT / 1000.0
+        
+        # 【保持原有loss计算】：基于子流重传数据
+        V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
+        
+        # 【修改reward函数】：综合考虑吞吐量和延迟
+        throughput_reward = -abs(target_tp - V_throughput)
+        delay_reward = -abs(target_rtt - V_RTT)
+        
+        # 加权组合：吞吐量占主导，延迟作为补充
+        reward = (1 - self.delay_weight) * throughput_reward + self.delay_weight * delay_reward
+        
+        # 【增强的调试信息】：显示新旧计算方式的对比和延迟信息
+        if self.meta_measurement_count % 10 == 0:  # 每10次计算显示一次详细对比
+            segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
+            print(f"[Env.reward] META_TP={V_throughput:.3f} Mbps, "
+                  f"SEGMENTS_TP={segments_tp:.3f} Mbps, "
+                  f"PING_RTT={V_RTT*1000:.1f}ms, "
+                  f"TARGET_TP={target_tp:.3f}, TARGET_RTT={target_rtt*1000:.1f}ms, "
+                  f"reward={reward:.3f}")
+        else:
+            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, RTT={V_RTT*1000:.1f}ms, reward={reward:.3f}")
             
-        return total_reward
+        return reward
+    
+    def _calculate_ping_delay(self):
+        """
+        【新增】：从sender获取最近的PING-PONG延迟测量并计算平均值
+        
+        Returns:
+            float or None: 平均延迟(ms)，如果没有可用数据则返回None
+        """
+        if self.sender is None:
+            return None
+            
+        try:
+            # 获取最近150ms内的延迟测量（与SI时间窗口对齐）
+            recent_delays = self.sender.get_recent_delays(window_ms=150)
+            
+            if not recent_delays:
+                return None
+                
+            # 计算平均延迟，排除异常值
+            if len(recent_delays) >= 3:
+                # 如果有足够的样本，排除最大和最小值后计算平均
+                sorted_delays = sorted(recent_delays)
+                trimmed_delays = sorted_delays[1:-1]  # 去掉最大和最小值
+                avg_delay = sum(trimmed_delays) / len(trimmed_delays)
+            else:
+                # 样本数较少时直接平均
+                avg_delay = sum(recent_delays) / len(recent_delays)
+                
+            return avg_delay
+            
+        except Exception as e:
+            print(f"[Env._calculate_ping_delay] Error: {e}")
+            return None
         
     def reset(self):
         #在MPTCP连接开始时初始化LSTM需要的历史数据
