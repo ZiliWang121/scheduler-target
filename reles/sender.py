@@ -23,6 +23,7 @@ import shutil
 import pandas as pd
 import re
 import random
+import select  # 【新增】用于非阻塞socket操作
 
 #structure and modulisation based on github.com/gaogogo/Experiment
 
@@ -38,20 +39,23 @@ class MPTCPSender(threading.Thread):
         self.transfer_event = Event()
         self.results = []  # 存储每个文件的传输结果
         
-        # 【新增】延迟测量相关属性
+        # 【修复】延迟测量相关属性 - 重新设计数据结构
         self.delay_measurements = []  # 存储[(delay_ms, received_timestamp), ...]
         self.delay_lock = threading.Lock()  # 线程安全锁
         self.probe_sequence = 0  # 探测包序号
-        self.probe_interval = 0.05  # 【恢复】50ms发送一次探测包
-        self.pending_probes = {}  # 【简化】不再需要追踪pending probes，因为延迟在receiver端计算
+        self.probe_interval = 0.05  # 50ms发送一次探测包
         self.delay_active = False  # 控制延迟测量线程
+        
+        # 【新增】用于socket数据分离的缓冲区
+        self.socket_buffer = b""
+        self.socket_lock = threading.Lock()
         
     def get_recent_delays(self, window_ms=150):
         """
-        获取最近window_ms毫秒内收到的延迟测量，供Env调用
+        【强制One-Way Delay】获取最近window_ms毫秒内收到的延迟测量，供Env调用
         
         Args:
-            window_ms: 时间窗口，默认150ms（避免跨action的数据污染）
+            window_ms: 时间窗口，默认150ms
             
         Returns:
             list: 最近的延迟测量值列表 [delay1_ms, delay2_ms, ...]
@@ -65,11 +69,26 @@ class MPTCPSender(threading.Thread):
                 if received_time >= cutoff_time
             ]
             
+            # 【强制验证】：检查延迟测量系统是否正常工作
+            total_measurements = len(self.delay_measurements)
+            if total_measurements == 0:
+                print(f"[Sender] *** CRITICAL: NO DELAY MEASUREMENTS RECEIVED AT ALL ***")
+                print(f"[Sender] *** PING system appears to be completely broken ***")
+            elif len(recent_delays) == 0 and total_measurements > 0:
+                latest_time = max(received_time for _, received_time in self.delay_measurements) if self.delay_measurements else 0
+                age = current_time - latest_time
+                print(f"[Sender] *** WARNING: No recent delays in {window_ms}ms window ***")
+                print(f"[Sender] *** Total measurements: {total_measurements}, latest age: {age:.3f}s ***")
+            
         return recent_delays
     
     def delay_probe_worker(self, sock):
         """
-        每50ms在MPTCP连接中发送一次延迟探测包的工作线程
+        【修复】每50ms在MPTCP连接中发送一次延迟探测包的工作线程
+        修复要点：
+        1. 确保探测包格式正确
+        2. 控制发送频率
+        3. 添加详细的调试信息
         """
         print("[Sender] Delay probe worker started")
         
@@ -77,99 +96,120 @@ class MPTCPSender(threading.Thread):
         while not self.transfer_event.is_set():
             time.sleep(0.1)
         
-        # 等待1秒让连接稳定
-        time.sleep(1.0)
+        # 【修复】延迟启动，让连接和文件传输先稳定
+        time.sleep(2.0)  # 增加到2秒
         
         self.delay_active = True
         probe_count = 0
         max_probes = 1000  # 最多发送1000个探测包
         
+        print("[Sender] Starting delay probe transmission")
+        
         while self.transfer_event.is_set() and self.delay_active and probe_count < max_probes:
             try:
-                # 【修正】构造探测包: PING:timestamp_seconds:sequence\n
-                # 用于one-way delay测量，receiver端会计算延迟
+                # 【修复】构造探测包格式：PING:timestamp:sequence\n
                 sent_timestamp = time.time()
-                
                 probe_msg = f"PING:{sent_timestamp:.6f}:{self.probe_sequence}\n"
                 probe_data = probe_msg.encode('utf-8')
                 
-                # 【简化】不需要记录pending，因为延迟在receiver端计算
+                # 【关键修复】使用send而不是sendall，并添加错误处理
+                try:
+                    bytes_sent = sock.send(probe_data)
+                    if bytes_sent == len(probe_data):
+                        self.probe_sequence += 1
+                        probe_count += 1
+                        
+                        # 【调试】前10个包打印详细信息
+                        if probe_count <= 10:
+                            print(f"[Sender] Sent probe #{self.probe_sequence-1}: {sent_timestamp:.6f}")
+                        elif probe_count % 50 == 0:
+                            print(f"[Sender] Sent {probe_count} delay probes")
+                    else:
+                        print(f"[Sender] Warning: Probe send incomplete {bytes_sent}/{len(probe_data)}")
+                        
+                except socket.error as e:
+                    print(f"[Sender] Probe send socket error: {e}")
+                    time.sleep(0.1)  # 短暂等待后继续
+                    continue
                 
-                # 在MPTCP连接中发送探测包
-                sock.send(probe_data)
-                self.probe_sequence += 1
-                probe_count += 1
-                
-                # 每100个探测包打印一次状态
-                if probe_count % 100 == 0:
-                    print(f"[Sender] Sent {probe_count} delay probes")
-                
-                # 等待50ms后发送下一个
+                # 【修复】精确控制发送间隔
                 time.sleep(self.probe_interval)
                 
             except Exception as e:
-                print(f"[Sender] Probe send error: {e}")
+                print(f"[Sender] Probe worker unexpected error: {e}")
                 break
                 
         print(f"[Sender] Delay probe worker stopped after {probe_count} probes")
         self.delay_active = False
     
-    def delay_reply_worker(self, sock):
+    def unified_socket_reader(self, sock):
         """
-        接收并处理延迟回复包的工作线程
+        【新增】统一的socket数据读取器，负责分离文件数据和延迟回复
+        这是修复的关键：将所有socket接收逻辑集中到一个地方
         """
-        print("[Sender] Delay reply worker started")
-        
-        # 【修复】使用非阻塞模式而不是超时
-        import select
+        print("[Sender] Unified socket reader started")
         
         buffer = b""
-        reply_count = 0
+        delay_reply_count = 0
         
-        while self.transfer_event.is_set() and self.delay_active:
+        while self.transfer_event.is_set():
             try:
-                # 使用select检查是否有数据可读，超时100ms
+                # 【修复】使用select进行非阻塞读取，超时100ms
                 ready, _, _ = select.select([sock], [], [], 0.1)
                 
-                if ready:
-                    # 有数据可读
-                    data = sock.recv(1024)
+                if not ready:
+                    continue  # 没有数据可读，继续循环
+                
+                # 有数据可读，接收数据
+                try:
+                    data = sock.recv(4096)
                     if not data:
-                        continue
+                        print("[Sender] Socket closed by receiver")
+                        break
                         
                     buffer += data
                     
-                    # 在buffer中查找完整的回复行
+                    # 【关键修复】处理缓冲区中的延迟回复
                     while b'\n' in buffer:
                         line_end = buffer.find(b'\n')
                         line = buffer[:line_end].decode('utf-8', errors='ignore')
                         buffer = buffer[line_end + 1:]
                         
-                        # 【修正】检查是否是DELAY回复（包含计算好的延迟值）
+                        # 【修复】检查是否是DELAY回复
                         if line.startswith('DELAY:'):
                             self.handle_delay_reply(line)
-                            reply_count += 1
+                            delay_reply_count += 1
                             
-                            # 【增加】详细调试信息
-                            if reply_count <= 5 or reply_count % 20 == 0:
+                            # 【调试】前10个回复打印详细信息
+                            if delay_reply_count <= 10:
+                                print(f"[Sender] Processed DELAY reply #{delay_reply_count}: {line[:50]}...")
+                            elif delay_reply_count % 20 == 0:
                                 recent = self.get_recent_delays(window_ms=150)
                                 if recent:
                                     avg_delay = sum(recent) / len(recent)
-                                    latest_delay = recent[-1]
-                                    print(f"[Sender] Reply #{reply_count}: latest={latest_delay:.1f}ms, avg={avg_delay:.1f}ms")
-                else:
-                    # 没有数据，继续循环
+                                    print(f"[Sender] Processed {delay_reply_count} replies, recent avg delay: {avg_delay:.1f}ms")
+                        # 【注意】非DELAY回复的数据（如果有）会被忽略，这在当前设计中是正确的
+                        # 因为文件传输是单向的，receiver不应该发送其他类型的回复
+                        
+                except socket.error as e:
+                    print(f"[Sender] Socket read error: {e}")
+                    time.sleep(0.1)
                     continue
                         
             except Exception as e:
-                print(f"[Sender] Reply receive error: {e}")
+                print(f"[Sender] Unified reader unexpected error: {e}")
                 break
                 
-        print(f"[Sender] Delay reply worker stopped, processed {reply_count} replies")
+        print(f"[Sender] Unified socket reader stopped, processed {delay_reply_count} delay replies")
     
     def handle_delay_reply(self, reply_line):
         """
-        【修正】处理receiver发回的one-way delay测量结果
+        【强制One-Way Delay】处理receiver发回的one-way delay测量结果
+        修复要点：
+        1. 更严格的格式检查
+        2. 更好的错误处理
+        3. 延迟合理性验证
+        4. 强制性的成功确认
         
         Args:
             reply_line: 格式为 "DELAY:delay_ms:sequence"
@@ -182,27 +222,34 @@ class MPTCPSender(threading.Thread):
                 
                 received_timestamp = time.time()
                 
-                # 【调试】前几个回复打印详细信息
-                if len(self.delay_measurements) < 5:
-                    print(f"[Sender] DELAY reply #{sequence}: one_way_delay={delay_ms:.3f}ms")
-                
-                # 【添加】基本的延迟合理性检查
-                if 0 < delay_ms < 10000:  # 延迟应该在0-10秒之间
+                # 【强制验证】：更严格的延迟合理性检查
+                if 0.1 < delay_ms < 5000:  # 延迟应该在0.1ms-5秒之间
                     with self.delay_lock:
-                        # 直接存储receiver计算的延迟测量结果
+                        # 存储延迟测量结果
                         self.delay_measurements.append((delay_ms, received_timestamp))
                         
-                        # 保持最近100次测量，避免内存无限增长
-                        if len(self.delay_measurements) > 100:
+                        # 【优化】保持最近200次测量（增加容量）
+                        if len(self.delay_measurements) > 200:
                             self.delay_measurements.pop(0)
+                        
+                        # 【强制确认】：前10个有效回复打印详细信息
+                        if len(self.delay_measurements) <= 10:
+                            print(f"[Sender] ✓ VALID ONE-WAY DELAY #{sequence}: {delay_ms:.3f}ms (total: {len(self.delay_measurements)})")
+                        elif len(self.delay_measurements) % 20 == 0:
+                            recent = self.get_recent_delays(window_ms=500)  # 检查最近500ms
+                            if recent:
+                                avg_delay = sum(recent) / len(recent)
+                                print(f"[Sender] ✓ PING SYSTEM WORKING: {len(self.delay_measurements)} total, recent avg: {avg_delay:.1f}ms")
                 else:
-                    print(f"[Sender] Invalid delay measurement: {delay_ms:.1f}ms, discarding")
+                    print(f"[Sender] *** INVALID DELAY: {delay_ms:.1f}ms (seq #{sequence}) - outside valid range ***")
+            else:
+                print(f"[Sender] *** MALFORMED DELAY REPLY: '{reply_line}' - wrong format ***")
                             
         except (ValueError, IndexError) as e:
-            print(f"[Sender] Invalid DELAY format: {reply_line}, error: {e}")
+            print(f"[Sender] *** DELAY PARSING ERROR: '{reply_line}' - {e} ***")
         
     def run(self):
-        """建立一次MPTCP连接，发送多个文件"""
+        """【修复】建立一次MPTCP连接，发送多个文件，同时进行延迟测量"""
         # 创建MPTCP socket
         MPTCP_ENABLED = 42
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -211,15 +258,18 @@ class MPTCPSender(threading.Thread):
         # 启用MPTCP
         try:
             sock.setsockopt(socket.IPPROTO_TCP, MPTCP_ENABLED, 1)
-        except:
-            print("[Sender] Warning: Could not enable MPTCP")
+            print("[Sender] MPTCP enabled successfully")
+        except Exception as e:
+            print(f"[Sender] Warning: Could not enable MPTCP: {e}")
         
         try:
             # 建立连接
+            print(f"[Sender] Connecting to {self.IP}:{self.PORT}")
             sock.connect((self.IP, self.PORT))
             sock.settimeout(None)  # 连接后取消超时
             fd = sock.fileno()
             mpsched.persist_state(fd)
+            print("[Sender] MPTCP connection established")
             
             # 【修改】启动Online Agent，传递sender引用
             agent = Online_Agent(fd=fd, cfg=self.cfg, memory=self.memory, 
@@ -227,14 +277,15 @@ class MPTCPSender(threading.Thread):
             agent.start()
             self.transfer_event.set()
             
-            # 【新增】启动延迟测量相关线程
+            # 【关键修复】启动统一的socket读取器（替代原来的reply worker）
+            reader_thread = threading.Thread(target=self.unified_socket_reader, args=(sock,))
+            reader_thread.daemon = True
+            reader_thread.start()
+            
+            # 【修复】启动延迟探测线程
             probe_thread = threading.Thread(target=self.delay_probe_worker, args=(sock,))
             probe_thread.daemon = True
             probe_thread.start()
-            
-            reply_thread = threading.Thread(target=self.delay_reply_worker, args=(sock,))
-            reply_thread.daemon = True
-            reply_thread.start()
             
             # 依次发送每个文件
             for i, file_to_send in enumerate(self.file_list):
@@ -244,14 +295,17 @@ class MPTCPSender(threading.Thread):
                     # 发送文件名
                     filename_msg = f"FILE:{file_to_send}\n".encode('utf-8')
                     sock.send(filename_msg)
+                    print(f"[Sender] Sending file header: {file_to_send}")
                     
                     # 发送文件内容 - 与延迟探测包共享同一连接
                     with open(file_to_send, 'rb') as f:
+                        bytes_sent = 0
                         while True:
                             data = f.read(4096)
                             if not data:
                                 break
                             sock.sendall(data)
+                            bytes_sent += len(data)
                     
                     end_time = time.time()
                     completion_time = end_time - start_time
@@ -262,7 +316,8 @@ class MPTCPSender(threading.Thread):
                         'success': True
                     })
                     
-                    print(f"[Sender] File {i+1}/{len(self.file_list)} sent: {file_to_send} ({completion_time:.2f}s)")
+                    print(f"[Sender] File {i+1}/{len(self.file_list)} sent: {file_to_send} "
+                          f"({bytes_sent} bytes in {completion_time:.2f}s)")
                     
                     # 文件间短暂间隔
                     time.sleep(0.2)
@@ -292,11 +347,26 @@ class MPTCPSender(threading.Thread):
                     'success': False
                 })
         finally:
-            # 【新增】正确清理资源
+            # 【修复】正确清理资源
+            print("[Sender] Cleaning up connection")
             self.delay_active = False
             self.transfer_event.clear()
-            time.sleep(0.2)  # 等待线程结束
+            time.sleep(0.5)  # 等待线程结束
             sock.close()
+            
+            # 【调试】打印最终的延迟测量统计
+            with self.delay_lock:
+                total_measurements = len(self.delay_measurements)
+                if total_measurements > 0:
+                    recent_delays = self.get_recent_delays(window_ms=1000)  # 最近1秒的数据
+                    if recent_delays:
+                        avg_delay = sum(recent_delays) / len(recent_delays)
+                        print(f"[Sender] Final delay stats: {total_measurements} total measurements, "
+                              f"recent avg: {avg_delay:.1f}ms")
+                    else:
+                        print(f"[Sender] Final delay stats: {total_measurements} total measurements, no recent data")
+                else:
+                    print("[Sender] Final delay stats: No delay measurements received")
 
 def main(argv):
     cfg = ConfigParser()
@@ -329,7 +399,7 @@ def main(argv):
     if len(argv) >= 4:
         num_iterations = int(argv[3])
     if len(argv) >= 5:
-        batch_size = int(argv[4])  # 新增：批大小参数
+        batch_size = int(argv[4])
         
     now = datetime.now().replace(microsecond=0)
     start_train = now.strftime("%Y-%m-%d %H:%M:%S")

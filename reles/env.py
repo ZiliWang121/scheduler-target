@@ -8,22 +8,22 @@ class Env():
     
     :param fd: socket file descriptor
     :type fd: int
-    :param time: Stater Interval (SI). usually 3~4 RTTs
-    :type time: int
+    :param time_interval: Stater Interval (SI). usually 3~4 RTTs  # 【修复】重命名参数
+    :type time_interval: int
     :param k: Number of past timesteps used in the stacked LSTM
     :type k: int
     :param alpha: first parameter of reward function to scale BDP (reduce bufferbloat|min->favors fast paths)
     :type alpha: float
     :param beta: second parameter of reward function to scale number of loss packets (reflects network congetsion|min->favors less congested paths)
     :type beta: float
-    :param sender: 【新增】sender对象引用，用于获取延迟测量
+    :param sender: 【修复】sender对象引用，用于获取延迟测量
     :type sender: MPTCPSender
     """
-    def __init__(self,fd,time,k,alpha,b,c,max_flows,target_tp,target_rtt,sender=None):  # 【修改】添加sender参数
+    def __init__(self,fd,time_interval,k,alpha,b,c,max_flows,target_tp,target_rtt,sender=None):  # 【修复】重命名time参数避免冲突
         """Constructor method
         """
         self.fd = fd
-        self.time = time
+        self.time = time_interval  # 【修复】使用重命名的参数
         self.k = k
         self.alpha = alpha
         self.b = b
@@ -50,9 +50,13 @@ class Env():
         # 【新增】：用于调试和验证的计数器
         self.meta_measurement_count = 0  # meta测量次数计数
         
-        # 【新增】：延迟测量相关
+        # 【修复】：延迟测量相关
         self.sender = sender  # 对sender的引用，用于获取延迟测量
         self.delay_weight = 0.3  # 延迟在reward中的权重，可根据需要调整
+        
+        # 【新增】：延迟测量统计
+        self.delay_measurement_count = 0  # 延迟测量计数
+        self.last_delay_check_time = time.time()  # 上次检查延迟的时间
 
     def get_targets(self):
         """获取当前目标值"""
@@ -146,17 +150,16 @@ class Env():
         
     def reward(self):
         """
-        【重要修改】：改进reward函数
+        【关键修复】：改进reward函数，集成真实的one-way delay测量
+        
+        修复要点：
         1. 基于meta层面的mptcpi_bytes_acked计算真实application throughput
-        2. 集成PING测量的真实端到端单向延迟（one-way delay）
+        2. 使用PING测量的真实端到端单向延迟（one-way delay）
+        3. 更好的fallback机制和错误处理
+        4. 详细的调试信息
         
         原逻辑：基于子流segments out的瞬时发送吞吐量 + 基于子流加权RTT
         新逻辑：基于meta层面确认字节数的确认吞吐量 + 基于PING的真实端到端单向延迟
-        
-        延迟测量机制：
-        - Sender每50ms发送PING包（包含时间戳）
-        - Receiver收到后立即计算one-way delay并发回给sender
-        - Reward计算时使用最近150ms内收到的延迟测量值的平均值
         
         :return: Reward value
         :type: float
@@ -164,7 +167,7 @@ class Env():
         # 获取目标值
         target_tp, target_rtt = self.get_targets()
         
-        # 【关键修改1】：改用meta层面的确认吞吐量计算
+        # 【关键修复1】：改用meta层面的确认吞吐量计算
         if self.last_bytes_acked > 0 and self.current_bytes_acked >= self.last_bytes_acked:
             # 计算在这个SI期间确认的字节数增量
             bytes_acked_delta = self.current_bytes_acked - self.last_bytes_acked
@@ -177,23 +180,28 @@ class Env():
             if self.meta_measurement_count % 10 == 0:  # 偶尔提示回退
                 print(f"[Env.reward] Using fallback throughput calculation")
         
-        # 【关键修改2】：强制使用PING测量的真实端到端单向延迟（one-way delay）
+        # 【关键修复2】：强制使用PING测量的真实端到端单向延迟（one-way delay）
         V_RTT = self._calculate_ping_delay()
         if V_RTT is None:
-            # 【修改】：如果没有one-way delay数据，使用默认目标值，不再fallback到RTT
-            V_RTT = target_rtt  # 使用目标延迟值作为默认值
-            print(f"[Env.reward] NO ONE-WAY DELAY DATA - using target delay: {V_RTT*1000:.1f}ms")
+            # 【强制要求】：如果没有one-way delay数据，报错并使用明显错误值
+            print(f"[Env.reward] *** ERROR: NO ONE-WAY DELAY DATA AVAILABLE ***")
+            print(f"[Env.reward] *** THIS SHOULD NOT HAPPEN - DELAY MEASUREMENT SYSTEM FAILED ***")
+            print(f"[Env.reward] *** USING INVALID DELAY VALUE -999999.0ms ***")
+            V_RTT = -999999.0  # 使用明显的错误值，这样reward会很差，强制系统修复延迟测量
         else:
-            # 转换延迟单位：ms -> s
-            V_RTT = V_RTT / 1000.0
-            print(f"[Env.reward] USING ONE-WAY DELAY: {V_RTT*1000:.1f}ms")
+            # 使用PING测量的延迟（已经是ms单位）
+            if self.delay_measurement_count % 5 == 0:  # 每5次测量打印一次
+                print(f"[Env.reward] ✓ USING ONE-WAY DELAY: {V_RTT:.1f}ms")
         
         # 【保持原有loss计算】：基于子流重传数据
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
         
-        # 【修改reward函数】：综合考虑吞吐量和延迟
+        # 【修复reward函数】：综合考虑吞吐量和延迟
+        # 将延迟从ms转换为s以匹配目标单位
+        V_RTT_seconds = V_RTT / 1000.0
+        
         throughput_reward = -abs(target_tp - V_throughput)
-        delay_reward = -abs(target_rtt - V_RTT)
+        delay_reward = -abs(target_rtt - V_RTT_seconds)
         
         # 加权组合：吞吐量占主导，延迟作为补充
         reward = (1 - self.delay_weight) * throughput_reward + self.delay_weight * delay_reward
@@ -203,49 +211,97 @@ class Env():
             segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
             print(f"[Env.reward] META_TP={V_throughput:.3f} Mbps, "
                   f"SEGMENTS_TP={segments_tp:.3f} Mbps, "
-                  f"ONE_WAY_DELAY={V_RTT*1000:.1f}ms, "
+                  f"DELAY={V_RTT:.1f}ms, "
                   f"TARGET_TP={target_tp:.3f}, TARGET_RTT={target_rtt*1000:.1f}ms, "
                   f"reward={reward:.3f}")
         else:
-            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, ONE_WAY_DELAY={V_RTT*1000:.1f}ms, reward={reward:.3f}")
+            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, DELAY={V_RTT:.1f}ms, reward={reward:.3f}")
             
         return reward
     
     def _calculate_ping_delay(self):
         """
-        【修正】：从sender获取最近的one-way delay测量并计算平均值
+        【强制One-Way Delay】：从sender获取最近的one-way delay测量并计算平均值
+        
+        这个函数必须返回PING测量的延迟，不允许fallback到RTT！
+        
+        修复要点：
+        1. 更严格的数据验证
+        2. 更好的异常值处理
+        3. 详细的调试信息
+        4. 强制要求有PING数据，否则返回None
         
         Returns:
             float or None: 平均单向延迟(ms)，如果没有可用数据则返回None
         """
         if self.sender is None:
-            print("[Env._calculate_ping_delay] No sender reference available")
+            if self.delay_measurement_count % 20 == 0:  # 减少日志频率
+                print("[Env._calculate_ping_delay] *** CRITICAL: No sender reference - PING delay system not initialized ***")
             return None
             
         try:
-            # 获取最近150ms内的延迟测量（与SI时间窗口对齐）
+            # 【修复】：获取最近150ms内的延迟测量（与SI时间窗口对齐）
             recent_delays = self.sender.get_recent_delays(window_ms=150)
             
+            current_time = time.time()
+            time_since_last_check = current_time - self.last_delay_check_time
+            
             if not recent_delays:
-                print(f"[Env._calculate_ping_delay] No recent delay data in 150ms window")
+                # 【强制要求】：必须有PING延迟数据
+                if self.delay_measurement_count % 5 == 0:  # 增加日志频率以便调试
+                    print(f"[Env._calculate_ping_delay] *** WARNING: NO PING DELAY DATA in 150ms window ***")
+                    print(f"[Env._calculate_ping_delay] *** Time since last check: {time_since_last_check:.3f}s ***")
+                    print(f"[Env._calculate_ping_delay] *** This indicates PING system is not working properly ***")
                 return None
                 
-            # 计算平均延迟，排除异常值
-            if len(recent_delays) >= 3:
+            # 【修复】：更严格的数据验证和异常值处理
+            valid_delays = []
+            invalid_count = 0
+            for delay in recent_delays:
+                # 延迟合理性检查：1ms到2000ms之间
+                if 1.0 <= delay <= 2000.0:
+                    valid_delays.append(delay)
+                else:
+                    invalid_count += 1
+                    if invalid_count <= 3:  # 只打印前3个无效值
+                        print(f"[Env._calculate_ping_delay] Discarding invalid delay: {delay:.1f}ms")
+            
+            if not valid_delays:
+                print(f"[Env._calculate_ping_delay] *** ERROR: All {len(recent_delays)} PING delays were invalid ***")
+                print(f"[Env._calculate_ping_delay] *** Raw delays: {recent_delays[:5]}... ***")
+                return None
+            
+            # 【修复】：计算平均延迟，如果样本足够则排除异常值
+            if len(valid_delays) >= 5:
                 # 如果有足够的样本，排除最大和最小值后计算平均
-                sorted_delays = sorted(recent_delays)
-                trimmed_delays = sorted_delays[1:-1]  # 去掉最大和最小值
+                sorted_delays = sorted(valid_delays)
+                # 排除最大和最小的10%
+                trim_count = max(1, len(sorted_delays) // 10)
+                trimmed_delays = sorted_delays[trim_count:-trim_count] if trim_count > 0 else sorted_delays
                 avg_delay = sum(trimmed_delays) / len(trimmed_delays)
-                print(f"[Env._calculate_ping_delay] Using {len(trimmed_delays)} delays: avg={avg_delay:.1f}ms")
-            else:
-                # 样本数较少时直接平均
-                avg_delay = sum(recent_delays) / len(recent_delays)
-                print(f"[Env._calculate_ping_delay] Using {len(recent_delays)} delays: avg={avg_delay:.1f}ms")
                 
+                if self.delay_measurement_count % 5 == 0:
+                    print(f"[Env._calculate_ping_delay] ✓ PING DELAY SUCCESS: {len(trimmed_delays)}/{len(valid_delays)} delays, "
+                          f"avg={avg_delay:.1f}ms, range=[{min(trimmed_delays):.1f}, {max(trimmed_delays):.1f}]ms")
+            elif len(valid_delays) >= 2:
+                # 样本数较少但足够时直接平均
+                avg_delay = sum(valid_delays) / len(valid_delays)
+                if self.delay_measurement_count % 5 == 0:
+                    print(f"[Env._calculate_ping_delay] ✓ PING DELAY SUCCESS: {len(valid_delays)} delays, avg={avg_delay:.1f}ms")
+            else:
+                # 样本数太少，不可靠
+                print(f"[Env._calculate_ping_delay] *** WARNING: Only {len(valid_delays)} valid PING delay(s), may be unreliable ***")
+                avg_delay = valid_delays[0]
+                print(f"[Env._calculate_ping_delay] ✓ Using single PING delay: {avg_delay:.1f}ms")
+            
+            self.delay_measurement_count += 1
+            self.last_delay_check_time = current_time
             return avg_delay
             
         except Exception as e:
-            print(f"[Env._calculate_ping_delay] Error: {e}")
+            print(f"[Env._calculate_ping_delay] *** CRITICAL ERROR: {e} ***")
+            import traceback
+            traceback.print_exc()
             return None
         
     def reset(self):
@@ -260,6 +316,10 @@ class Env():
         self.last_bytes_acked = 0
         self.current_bytes_acked = 0
         self.meta_measurement_count = 0
+        
+        # 【新增】：重置延迟测量变量
+        self.delay_measurement_count = 0
+        self.last_delay_check_time = time.time()
         
         raw_state = mpsched.get_sub_info(self.fd)
         subflow_state, bytes_acked = self._extract_meta_info(raw_state)
