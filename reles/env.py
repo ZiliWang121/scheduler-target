@@ -16,8 +16,10 @@ class Env():
     :type alpha: float
     :param beta: second parameter of reward function to scale number of loss packets (reflects network congetsion|min->favors less congested paths)
     :type beta: float
+    :param sender: 【新增】MPTCPSender引用，用于获取延迟测量数据
+    :type sender: MPTCPSender or None
     """
-    def __init__(self,fd,time,k,alpha,b,c,max_flows,target_tp,target_rtt):
+    def __init__(self,fd,time,k,alpha,b,c,max_flows,target_tp,target_rtt,sender=None):  # 【修改】添加sender参数
         """Constructor method
         """
         self.fd = fd
@@ -47,6 +49,12 @@ class Env():
         
         # 【新增】：用于调试和验证的计数器
         self.meta_measurement_count = 0  # meta测量次数计数
+        
+        # 【新增】：延迟测量相关
+        self.sender = sender  # MPTCPSender引用，用于获取延迟数据
+        
+        # 【新增】：延迟reward的权重配置
+        self.delay_weight = 0.1  # 延迟在reward中的权重，可调节
 
     def get_targets(self):
         """获取当前目标值"""
@@ -141,12 +149,10 @@ class Env():
     def reward(self):
         """
         【重要修改】：基于meta层面的mptcpi_bytes_acked计算真实application throughput
+        【新增功能】：加入基于实测延迟的reward计算
         
-        原逻辑：基于子流segments out的瞬时发送吞吐量
-        新逻辑：基于meta层面确认字节数的增量计算确认吞吐量
-        
-        这个修改使reward更接近实际的application throughput，
-        因为确认字节数反映了真正成功传输的数据量
+        原逻辑：只考虑吞吐量 reward = -abs(target_tp - actual_tp)
+        新逻辑：同时考虑吞吐量和延迟 reward = throughput_reward + delay_reward
         
         :return: Reward value
         :type: float
@@ -154,7 +160,7 @@ class Env():
         # 获取目标值
         target_tp, target_rtt = self.get_targets()
         
-        # 【关键修改】：改用meta层面的确认吞吐量计算
+        # 【保持原有】：计算吞吐量
         if self.last_bytes_acked > 0 and self.current_bytes_acked >= self.last_bytes_acked:
             # 计算在这个SI期间确认的字节数增量
             bytes_acked_delta = self.current_bytes_acked - self.last_bytes_acked
@@ -166,30 +172,38 @@ class Env():
             V_throughput = V_throughput_segments * 8 / (self.time * 1000)  # Mbps
             print(f"[Env.reward] Using fallback calculation (segments-based)")
         
-        # 【保持原有RTT计算】：基于子流数据的加权RTT
-        V_throughput_segments = self.tp[0][self.k-1] + self.tp[1][self.k-1]
-        if V_throughput_segments > 0:
-            V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
-                     self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput_segments
+        # 【新增】：计算实测延迟
+        measured_rtt = target_rtt  # 默认值：使用目标延迟
+        delay_sample_count = 0
+        
+        if self.sender:
+            # 从sender获取最近150ms的延迟测量
+            recent_delays = self.sender.get_recent_delays(window_ms=150)
+            if len(recent_delays) >= 2:  # 至少需要2个测量点才可靠
+                measured_rtt = sum(recent_delays) / len(recent_delays)
+                delay_sample_count = len(recent_delays)
+            # 如果没有足够的延迟数据，就使用目标值（保持原有行为）
+        
+        # 【修改】：计算综合reward = 吞吐量reward + 延迟reward
+        throughput_penalty = abs(target_tp - V_throughput)  # 吞吐量偏差
+        delay_penalty = abs(target_rtt - measured_rtt)      # 延迟偏差
+        
+        # 综合reward：两个部分都是惩罚项（越小越好），所以都是负值
+        throughput_reward = -throughput_penalty
+        delay_reward = -delay_penalty * self.delay_weight  # 延迟权重较小
+        
+        total_reward = throughput_reward + delay_reward
+        
+        # 【增强的调试信息】：显示新的reward计算过程
+        if self.meta_measurement_count % 5 == 0:  # 每5次计算显示一次详细信息
+            segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
+            print(f"[Env.reward] TP={V_throughput:.2f}Mbps(target={target_tp:.2f}), "
+                  f"RTT={measured_rtt:.1f}ms(target={target_rtt:.1f}, samples={delay_sample_count}), "
+                  f"reward={total_reward:.3f}(tp:{throughput_reward:.3f}+delay:{delay_reward:.3f})")
         else:
-            V_RTT = 0
-        
-        # 【保持原有loss计算】：基于子流重传数据
-        V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
-        
-        # 【保持原有reward函数】：只改变吞吐量计算方式，不改变reward公式
-        reward = - abs(target_tp - V_throughput)
-        
-        # 【增强的调试信息】：显示新旧计算方式的对比
-        if self.meta_measurement_count % 5 == 0:  # 每5次计算显示一次详细对比
-            segments_tp = V_throughput_segments * 8 / (self.time * 1000)
-            print(f"[Env.reward] META_TP={V_throughput:.3f} Mbps, "
-                  f"SEGMENTS_TP={segments_tp:.3f} Mbps, "
-                  f"TARGET={target_tp:.3f} Mbps, reward={reward:.3f}")
-        else:
-            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, reward={reward:.3f}")
+            print(f"[Env.reward] TP={V_throughput:.2f}Mbps, RTT={measured_rtt:.1f}ms, reward={total_reward:.3f}")
             
-        return reward
+        return total_reward
         
     def reset(self):
         #在MPTCP连接开始时初始化LSTM需要的历史数据

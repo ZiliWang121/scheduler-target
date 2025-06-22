@@ -35,9 +35,11 @@ class Online_Agent(threading.Thread):
     :type event: class:'threading.event'
     :param explore: Whether or not to use action exploration
     :explore type: boolean
+    :param sender: 【新增】MPTCPSender引用，用于获取延迟数据
+    :type sender: MPTCPSender
     """
 
-    def __init__(self, fd, cfg, memory, event, explore=True):
+    def __init__(self, fd, cfg, memory, event, explore=True, sender=None):  # 【修改】添加sender参数
         """Constructor Method"""
         threading.Thread.__init__(self)
         self.fd = fd
@@ -52,6 +54,8 @@ class Online_Agent(threading.Thread):
         self.ounoise = OUNoise(action_dimension=self.max_flows)
         self.agent = torch.load(self.agent_name)
         mpsched.persist_state(fd)
+        
+        # 【修改】创建Env时传递sender引用
         self.env = Env(fd=self.fd,
                        time=self.cfg.getfloat('env', 'time'),
                        k=self.cfg.getint('env', 'k'),
@@ -61,7 +65,9 @@ class Online_Agent(threading.Thread):
                        max_flows=self.max_flows,
                        # 添加对目标值的处理
                        target_tp=self.target_tp,
-                       target_rtt=self.target_rtt)
+                       target_rtt=self.target_rtt,
+                       sender=sender)  # 【新增】传递sender引用给Env
+        
         self.event = event
         # 改进2: 添加模型同步相关变量
         self.step_count = 0  # 记录执行了多少步
