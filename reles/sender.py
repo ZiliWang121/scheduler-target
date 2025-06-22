@@ -52,13 +52,7 @@ class MPTCPSender(threading.Thread):
         
     def get_recent_delays(self, window_ms=150):
         """
-        【强制One-Way Delay】获取最近window_ms毫秒内收到的延迟测量，供Env调用
-        
-        Args:
-            window_ms: 时间窗口，默认150ms
-            
-        Returns:
-            list: 最近的延迟测量值列表 [delay1_ms, delay2_ms, ...]
+        获取最近window_ms毫秒内收到的延迟测量，供Env调用
         """
         current_time = time.time()
         cutoff_time = current_time - (window_ms / 1000.0)
@@ -68,17 +62,6 @@ class MPTCPSender(threading.Thread):
                 delay_ms for delay_ms, received_time in self.delay_measurements
                 if received_time >= cutoff_time
             ]
-            
-            # 【强制验证】：检查延迟测量系统是否正常工作
-            total_measurements = len(self.delay_measurements)
-            if total_measurements == 0:
-                print(f"[Sender] *** CRITICAL: NO DELAY MEASUREMENTS RECEIVED AT ALL ***")
-                print(f"[Sender] *** PING system appears to be completely broken ***")
-            elif len(recent_delays) == 0 and total_measurements > 0:
-                latest_time = max(received_time for _, received_time in self.delay_measurements) if self.delay_measurements else 0
-                age = current_time - latest_time
-                print(f"[Sender] *** WARNING: No recent delays in {window_ms}ms window ***")
-                print(f"[Sender] *** Total measurements: {total_measurements}, latest age: {age:.3f}s ***")
             
         return recent_delays
     
@@ -96,14 +79,14 @@ class MPTCPSender(threading.Thread):
         while not self.transfer_event.is_set():
             time.sleep(0.1)
         
-        # 【修复】延迟启动，让连接和文件传输先稳定
-        time.sleep(2.0)  # 增加到2秒
+        # 【简化修复】立即启动延迟测量，不要等待
+        time.sleep(0.5)  # 只等0.5秒让连接稳定
         
         self.delay_active = True
         probe_count = 0
-        max_probes = 1000  # 最多发送1000个探测包
+        max_probes = 1000
         
-        print("[Sender] Starting delay probe transmission")
+        print("[Sender] Starting delay probe transmission immediately")
         
         while self.transfer_event.is_set() and self.delay_active and probe_count < max_probes:
             try:

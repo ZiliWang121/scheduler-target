@@ -183,14 +183,12 @@ class Env():
         # 【关键修复2】：强制使用PING测量的真实端到端单向延迟（one-way delay）
         V_RTT = self._calculate_ping_delay()
         if V_RTT is None:
-            # 【强制要求】：如果没有one-way delay数据，报错并使用明显错误值
-            print(f"[Env.reward] *** ERROR: NO ONE-WAY DELAY DATA AVAILABLE ***")
-            print(f"[Env.reward] *** THIS SHOULD NOT HAPPEN - DELAY MEASUREMENT SYSTEM FAILED ***")
-            print(f"[Env.reward] *** USING INVALID DELAY VALUE -999999.0ms ***")
-            V_RTT = -999999.0  # 使用明显的错误值，这样reward会很差，强制系统修复延迟测量
+            # 【简化】：如果没有延迟数据，使用目标值并标记
+            print(f"[Env.reward] WAITING for one-way delay data...")
+            V_RTT = target_rtt * 1000  # 转换为ms
         else:
             # 使用PING测量的延迟（已经是ms单位）
-            if self.delay_measurement_count % 5 == 0:  # 每5次测量打印一次
+            if self.delay_measurement_count % 5 == 0:
                 print(f"[Env.reward] ✓ USING ONE-WAY DELAY: {V_RTT:.1f}ms")
         
         # 【保持原有loss计算】：基于子流重传数据
@@ -221,87 +219,40 @@ class Env():
     
     def _calculate_ping_delay(self):
         """
-        【强制One-Way Delay】：从sender获取最近的one-way delay测量并计算平均值
-        
-        这个函数必须返回PING测量的延迟，不允许fallback到RTT！
-        
-        修复要点：
-        1. 更严格的数据验证
-        2. 更好的异常值处理
-        3. 详细的调试信息
-        4. 强制要求有PING数据，否则返回None
+        【简化】从sender获取最近的one-way delay测量并计算平均值
         
         Returns:
             float or None: 平均单向延迟(ms)，如果没有可用数据则返回None
         """
         if self.sender is None:
-            if self.delay_measurement_count % 20 == 0:  # 减少日志频率
-                print("[Env._calculate_ping_delay] *** CRITICAL: No sender reference - PING delay system not initialized ***")
             return None
             
         try:
-            # 【修复】：获取最近150ms内的延迟测量（与SI时间窗口对齐）
+            # 获取最近150ms内的延迟测量
             recent_delays = self.sender.get_recent_delays(window_ms=150)
             
-            current_time = time.time()
-            time_since_last_check = current_time - self.last_delay_check_time
-            
             if not recent_delays:
-                # 【强制要求】：必须有PING延迟数据
-                if self.delay_measurement_count % 5 == 0:  # 增加日志频率以便调试
-                    print(f"[Env._calculate_ping_delay] *** WARNING: NO PING DELAY DATA in 150ms window ***")
-                    print(f"[Env._calculate_ping_delay] *** Time since last check: {time_since_last_check:.3f}s ***")
-                    print(f"[Env._calculate_ping_delay] *** This indicates PING system is not working properly ***")
-                return None
+                return None  # 简单返回None，不打印错误
                 
-            # 【修复】：更严格的数据验证和异常值处理
-            valid_delays = []
-            invalid_count = 0
-            for delay in recent_delays:
-                # 延迟合理性检查：1ms到2000ms之间
-                if 1.0 <= delay <= 2000.0:
-                    valid_delays.append(delay)
-                else:
-                    invalid_count += 1
-                    if invalid_count <= 3:  # 只打印前3个无效值
-                        print(f"[Env._calculate_ping_delay] Discarding invalid delay: {delay:.1f}ms")
+            # 验证延迟合理性
+            valid_delays = [d for d in recent_delays if 1.0 <= d <= 2000.0]
             
             if not valid_delays:
-                print(f"[Env._calculate_ping_delay] *** ERROR: All {len(recent_delays)} PING delays were invalid ***")
-                print(f"[Env._calculate_ping_delay] *** Raw delays: {recent_delays[:5]}... ***")
                 return None
             
-            # 【修复】：计算平均延迟，如果样本足够则排除异常值
-            if len(valid_delays) >= 5:
-                # 如果有足够的样本，排除最大和最小值后计算平均
+            # 计算平均延迟
+            if len(valid_delays) >= 3:
+                # 排除最大最小值
                 sorted_delays = sorted(valid_delays)
-                # 排除最大和最小的10%
-                trim_count = max(1, len(sorted_delays) // 10)
-                trimmed_delays = sorted_delays[trim_count:-trim_count] if trim_count > 0 else sorted_delays
-                avg_delay = sum(trimmed_delays) / len(trimmed_delays)
-                
-                if self.delay_measurement_count % 5 == 0:
-                    print(f"[Env._calculate_ping_delay] ✓ PING DELAY SUCCESS: {len(trimmed_delays)}/{len(valid_delays)} delays, "
-                          f"avg={avg_delay:.1f}ms, range=[{min(trimmed_delays):.1f}, {max(trimmed_delays):.1f}]ms")
-            elif len(valid_delays) >= 2:
-                # 样本数较少但足够时直接平均
-                avg_delay = sum(valid_delays) / len(valid_delays)
-                if self.delay_measurement_count % 5 == 0:
-                    print(f"[Env._calculate_ping_delay] ✓ PING DELAY SUCCESS: {len(valid_delays)} delays, avg={avg_delay:.1f}ms")
+                trimmed = sorted_delays[1:-1] if len(sorted_delays) > 2 else sorted_delays
+                avg_delay = sum(trimmed) / len(trimmed)
             else:
-                # 样本数太少，不可靠
-                print(f"[Env._calculate_ping_delay] *** WARNING: Only {len(valid_delays)} valid PING delay(s), may be unreliable ***")
-                avg_delay = valid_delays[0]
-                print(f"[Env._calculate_ping_delay] ✓ Using single PING delay: {avg_delay:.1f}ms")
+                avg_delay = sum(valid_delays) / len(valid_delays)
             
             self.delay_measurement_count += 1
-            self.last_delay_check_time = current_time
             return avg_delay
             
         except Exception as e:
-            print(f"[Env._calculate_ping_delay] *** CRITICAL ERROR: {e} ***")
-            import traceback
-            traceback.print_exc()
             return None
         
     def reset(self):

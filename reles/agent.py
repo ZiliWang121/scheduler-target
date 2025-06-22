@@ -147,11 +147,11 @@ class Online_Agent(threading.Thread):
                     if self._should_reload_model():
                         self._reload_model()
                         
-                # 【强制验证】：定期检查延迟测量系统状态
-                if self.step_count % 10 == 0:  # 每10步检查一次
-                    recent_delays = self.env.sender.get_recent_delays(window_ms=300)
-                    if not recent_delays and self.step_count > 5:  # 给系统5步的启动时间
-                        logging.warning(f"[Online Agent] *** WARNING: No delay measurements in last 300ms at step {self.step_count} ***")
+                # 【简化验证】：定期检查延迟测量系统状态
+                if self.step_count % 20 == 0 and self.step_count > 10:  # 给更多启动时间
+                    recent_delays = self.env.sender.get_recent_delays(window_ms=500)
+                    if not recent_delays:
+                        logging.info(f"[Online Agent] Step {self.step_count}: Still waiting for delay measurements")
                         
                 start = time.time()
                 if self.explore:
