@@ -182,6 +182,10 @@ class MPTCPSender(threading.Thread):
                 
                 received_timestamp = time.time()
                 
+                # 【调试】前几个回复打印详细信息
+                if len(self.delay_measurements) < 5:
+                    print(f"[Sender] DELAY reply #{sequence}: one_way_delay={delay_ms:.3f}ms")
+                
                 # 【添加】基本的延迟合理性检查
                 if 0 < delay_ms < 10000:  # 延迟应该在0-10秒之间
                     with self.delay_lock:

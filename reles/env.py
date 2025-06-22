@@ -177,21 +177,16 @@ class Env():
             if self.meta_measurement_count % 10 == 0:  # 偶尔提示回退
                 print(f"[Env.reward] Using fallback throughput calculation")
         
-        # 【关键修改2】：使用PING-PONG测量的真实端到端单向延迟（one-way delay）
+        # 【关键修改2】：强制使用PING测量的真实端到端单向延迟（one-way delay）
         V_RTT = self._calculate_ping_delay()
         if V_RTT is None:
-            # 如果没有PING延迟数据，回退到原有基于子流的加权RTT计算
-            V_throughput_segments = self.tp[0][self.k-1] + self.tp[1][self.k-1]
-            if V_throughput_segments > 0:
-                V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
-                         self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput_segments
-            else:
-                V_RTT = 0
-            if self.meta_measurement_count % 20 == 0:  # 偶尔提示回退
-                print(f"[Env.reward] Using fallback RTT calculation: {V_RTT:.3f}s")
+            # 【修改】：如果没有one-way delay数据，使用默认目标值，不再fallback到RTT
+            V_RTT = target_rtt  # 使用目标延迟值作为默认值
+            print(f"[Env.reward] NO ONE-WAY DELAY DATA - using target delay: {V_RTT*1000:.1f}ms")
         else:
             # 转换延迟单位：ms -> s
             V_RTT = V_RTT / 1000.0
+            print(f"[Env.reward] USING ONE-WAY DELAY: {V_RTT*1000:.1f}ms")
         
         # 【保持原有loss计算】：基于子流重传数据
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
@@ -203,7 +198,7 @@ class Env():
         # 加权组合：吞吐量占主导，延迟作为补充
         reward = (1 - self.delay_weight) * throughput_reward + self.delay_weight * delay_reward
         
-        # 【增强的调试信息】：显示新旧计算方式的对比和延迟信息
+        # 【增强的调试信息】：明确显示新旧计算方式的对比和延迟信息
         if self.meta_measurement_count % 10 == 0:  # 每10次计算显示一次详细对比
             segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
             print(f"[Env.reward] META_TP={V_throughput:.3f} Mbps, "
@@ -224,6 +219,7 @@ class Env():
             float or None: 平均单向延迟(ms)，如果没有可用数据则返回None
         """
         if self.sender is None:
+            print("[Env._calculate_ping_delay] No sender reference available")
             return None
             
         try:
@@ -231,6 +227,7 @@ class Env():
             recent_delays = self.sender.get_recent_delays(window_ms=150)
             
             if not recent_delays:
+                print(f"[Env._calculate_ping_delay] No recent delay data in 150ms window")
                 return None
                 
             # 计算平均延迟，排除异常值
@@ -239,9 +236,11 @@ class Env():
                 sorted_delays = sorted(recent_delays)
                 trimmed_delays = sorted_delays[1:-1]  # 去掉最大和最小值
                 avg_delay = sum(trimmed_delays) / len(trimmed_delays)
+                print(f"[Env._calculate_ping_delay] Using {len(trimmed_delays)} delays: avg={avg_delay:.1f}ms")
             else:
                 # 样本数较少时直接平均
                 avg_delay = sum(recent_delays) / len(recent_delays)
+                print(f"[Env._calculate_ping_delay] Using {len(recent_delays)} delays: avg={avg_delay:.1f}ms")
                 
             return avg_delay
             

@@ -95,7 +95,13 @@ class ConnectionHandler(threading.Thread):
                     
                     # 【关键】计算one-way delay
                     receive_time = time.time()
-                    delay_ms = (receive_time - timestamp_seconds) / 10 # * 1000  # 转换为毫秒
+                    delay_ms = (receive_time - timestamp_seconds) * 1000  # 转换为毫秒
+                    
+                    # 【调试】前几个包打印详细时间戳信息
+                    if probe_count < 5:
+                        print(f"[Receiver] PING #{sequence}: send_time={timestamp_seconds:.6f}, "
+                              f"receive_time={receive_time:.6f}, "
+                              f"one_way_delay={delay_ms:.3f}ms")
                     
                     # 构造DELAY回复: "DELAY:delay_ms:sequence\n"
                     delay_msg = f"DELAY:{delay_ms:.3f}:{sequence}\n"
