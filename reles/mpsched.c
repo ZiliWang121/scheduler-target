@@ -1,9 +1,5 @@
-
-
 #include <Python.h>
 #include <linux/tcp.h>
-
-
 
 static PyObject* persist_state(PyObject *self, PyObject* args)
 {
@@ -14,7 +10,6 @@ static PyObject* persist_state(PyObject *self, PyObject* args)
 	int val = MPTCP_INFO_FLAG_SAVE_MASTER;
 	setsockopt(fd,SOL_TCP,MPTCP_INFO,&val,sizeof(val));
 	return Py_BuildValue("i",fd);
-
 }
 
 static PyObject* get_sub_info(PyObject* self, PyObject* args)
@@ -28,7 +23,6 @@ static PyObject* get_sub_info(PyObject* self, PyObject* args)
 	struct tcp_info initial;
 	struct tcp_info others[NUM_SUBFLOWS];	
 	struct mptcp_sub_info others_info[NUM_SUBFLOWS];
-	
 	
 	minfo.tcp_info_len = sizeof(struct tcp_info);
 	minfo.sub_len = sizeof(others);
@@ -45,6 +39,8 @@ static PyObject* get_sub_info(PyObject* self, PyObject* args)
 	
 	PyObject *list = PyList_New(0);
 	int i;
+	
+	// 遍历所有活跃子流，构建子流信息列表
 	for(i=0;i<NUM_SUBFLOWS;i++){
 		if(others[i].tcpi_state != 1)
 			break;
@@ -59,8 +55,27 @@ static PyObject* get_sub_info(PyObject* self, PyObject* args)
 		PyList_Append(subflows,Py_BuildValue("I",others[i].tcpi_snd_wnd));		
 		
 		PyList_Append(list,subflows);
-		
 	}
+	
+	/* 
+	 * 简化修改：只添加mptcpi_bytes_acked用于reward计算
+	 * 在子流信息列表的最后添加一个包含单一值的列表
+	 * 
+	 * 返回格式：
+	 * [
+	 *   [subflow0_info...],      # 子流0的8个字段
+	 *   [subflow1_info...],      # 子流1的8个字段  
+	 *   [bytes_acked]            # meta信息：只有确认字节数
+	 * ]
+	 */
+	PyObject *meta_list = PyList_New(0);
+	
+	// 只添加确认字节数，这是计算application throughput需要的唯一值
+	PyList_Append(meta_list, Py_BuildValue("K", meta_info.mptcpi_bytes_acked));
+	
+	// 将meta信息作为特殊条目添加到列表末尾
+	PyList_Append(list, meta_list);
+	
 	return list;		
 }
 
@@ -93,19 +108,15 @@ static PyObject* set_seg(PyObject* self,PyObject* args)
 	fflush(stderr);
 	setsockopt(fd,SOL_TCP,MPTCP_SCHED_INFO,&sched_info,sizeof(sched_info));
 	
-	
 	return Py_BuildValue("i",fd);	
 }
-
 
 static PyMethodDef Methods[]= {
 	{"persist_state", persist_state,METH_VARARGS,"persist mptcp subflows state"},
 	{"get_sub_info",get_sub_info,METH_VARARGS,"get mptcp subflow info"},
 	{"set_seg",set_seg,METH_VARARGS,"set num of segments in all mptcp subflows"},
 	{NULL,NULL,0,NULL}
-	
 };
-
 
 static struct PyModuleDef Def = {
 	PyModuleDef_HEAD_INIT,
@@ -119,7 +130,3 @@ PyMODINIT_FUNC PyInit_mpsched(void)
 {
 	return PyModule_Create(&Def);
 }
-
-
-
-
