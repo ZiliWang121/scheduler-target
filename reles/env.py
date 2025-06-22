@@ -148,10 +148,15 @@ class Env():
         """
         【重要修改】：改进reward函数
         1. 基于meta层面的mptcpi_bytes_acked计算真实application throughput
-        2. 集成PING-PONG测量的真实端到端延迟
+        2. 集成PING测量的真实端到端单向延迟（one-way delay）
         
         原逻辑：基于子流segments out的瞬时发送吞吐量 + 基于子流加权RTT
-        新逻辑：基于meta层面确认字节数的确认吞吐量 + 基于PING-PONG的真实端到端延迟
+        新逻辑：基于meta层面确认字节数的确认吞吐量 + 基于PING的真实端到端单向延迟
+        
+        延迟测量机制：
+        - Sender每50ms发送PING包（包含时间戳）
+        - Receiver收到后立即计算one-way delay并发回给sender
+        - Reward计算时使用最近150ms内收到的延迟测量值的平均值
         
         :return: Reward value
         :type: float
@@ -172,7 +177,7 @@ class Env():
             if self.meta_measurement_count % 10 == 0:  # 偶尔提示回退
                 print(f"[Env.reward] Using fallback throughput calculation")
         
-        # 【关键修改2】：使用PING-PONG测量的真实端到端延迟
+        # 【关键修改2】：使用PING-PONG测量的真实端到端单向延迟（one-way delay）
         V_RTT = self._calculate_ping_delay()
         if V_RTT is None:
             # 如果没有PING延迟数据，回退到原有基于子流的加权RTT计算
@@ -203,20 +208,20 @@ class Env():
             segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
             print(f"[Env.reward] META_TP={V_throughput:.3f} Mbps, "
                   f"SEGMENTS_TP={segments_tp:.3f} Mbps, "
-                  f"PING_RTT={V_RTT*1000:.1f}ms, "
+                  f"ONE_WAY_DELAY={V_RTT*1000:.1f}ms, "
                   f"TARGET_TP={target_tp:.3f}, TARGET_RTT={target_rtt*1000:.1f}ms, "
                   f"reward={reward:.3f}")
         else:
-            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, RTT={V_RTT*1000:.1f}ms, reward={reward:.3f}")
+            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, ONE_WAY_DELAY={V_RTT*1000:.1f}ms, reward={reward:.3f}")
             
         return reward
     
     def _calculate_ping_delay(self):
         """
-        【新增】：从sender获取最近的PING-PONG延迟测量并计算平均值
+        【修正】：从sender获取最近的one-way delay测量并计算平均值
         
         Returns:
-            float or None: 平均延迟(ms)，如果没有可用数据则返回None
+            float or None: 平均单向延迟(ms)，如果没有可用数据则返回None
         """
         if self.sender is None:
             return None

@@ -85,20 +85,24 @@ class ConnectionHandler(threading.Thread):
             # 从缓冲区移除已处理的PING行
             buffer = buffer[:ping_start] + buffer[newline_pos + 1:]
             
-            # 处理PING并发送PONG回复
+            # 【修正】处理PING并计算one-way delay，然后回复结果
             try:
                 # 解析PING: "PING:timestamp_seconds:sequence"
                 parts = ping_line.split(':')
                 if len(parts) >= 3:
-                    timestamp_seconds = parts[1]  # 【修复】保持原始格式
+                    timestamp_seconds = float(parts[1])  # 发送时间戳
                     sequence = parts[2]
                     
-                    # 构造PONG回复: "PONG:timestamp_seconds:sequence\n"
-                    pong_msg = f"PONG:{timestamp_seconds}:{sequence}\n"
-                    pong_data = pong_msg.encode('utf-8')
+                    # 【关键】计算one-way delay
+                    receive_time = time.time()
+                    delay_ms = (receive_time - timestamp_seconds) / 10 # * 1000  # 转换为毫秒
+                    
+                    # 构造DELAY回复: "DELAY:delay_ms:sequence\n"
+                    delay_msg = f"DELAY:{delay_ms:.3f}:{sequence}\n"
+                    delay_data = delay_msg.encode('utf-8')
                     
                     # 立即发送回复
-                    self.conn.send(pong_data)
+                    self.conn.send(delay_data)
                     probe_count += 1
                     
             except Exception as e:

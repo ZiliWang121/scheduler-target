@@ -42,8 +42,8 @@ class MPTCPSender(threading.Thread):
         self.delay_measurements = []  # 存储[(delay_ms, received_timestamp), ...]
         self.delay_lock = threading.Lock()  # 线程安全锁
         self.probe_sequence = 0  # 探测包序号
-        self.probe_interval = 0.05  # 50ms发送一次探测包
-        self.pending_probes = {}  # 记录已发送但未收到回复的探测包: {seq: sent_timestamp}
+        self.probe_interval = 0.05  # 【恢复】50ms发送一次探测包
+        self.pending_probes = {}  # 【简化】不再需要追踪pending probes，因为延迟在receiver端计算
         self.delay_active = False  # 控制延迟测量线程
         
     def get_recent_delays(self, window_ms=150):
@@ -86,20 +86,14 @@ class MPTCPSender(threading.Thread):
         
         while self.transfer_event.is_set() and self.delay_active and probe_count < max_probes:
             try:
-                # 【修复】构造探测包: PING:timestamp_seconds:sequence\n
+                # 【修正】构造探测包: PING:timestamp_seconds:sequence\n
+                # 用于one-way delay测量，receiver端会计算延迟
                 sent_timestamp = time.time()
                 
                 probe_msg = f"PING:{sent_timestamp:.6f}:{self.probe_sequence}\n"
                 probe_data = probe_msg.encode('utf-8')
                 
-                # 记录发送的探测包
-                with self.delay_lock:
-                    self.pending_probes[self.probe_sequence] = sent_timestamp
-                    # 避免内存泄漏：删除超过3秒未回复的探测包
-                    timeout_threshold = sent_timestamp - 3.0
-                    timeout_seqs = [seq for seq, ts in self.pending_probes.items() if ts < timeout_threshold]
-                    for seq in timeout_seqs:
-                        del self.pending_probes[seq]
+                # 【简化】不需要记录pending，因为延迟在receiver端计算
                 
                 # 在MPTCP连接中发送探测包
                 sock.send(probe_data)
@@ -108,7 +102,7 @@ class MPTCPSender(threading.Thread):
                 
                 # 每100个探测包打印一次状态
                 if probe_count % 100 == 0:
-                    print(f"[Sender] Sent {probe_count} delay probes, pending: {len(self.pending_probes)}")
+                    print(f"[Sender] Sent {probe_count} delay probes")
                 
                 # 等待50ms后发送下一个
                 time.sleep(self.probe_interval)
@@ -151,8 +145,8 @@ class MPTCPSender(threading.Thread):
                         line = buffer[:line_end].decode('utf-8', errors='ignore')
                         buffer = buffer[line_end + 1:]
                         
-                        # 检查是否是PONG回复
-                        if line.startswith('PONG:'):
+                        # 【修正】检查是否是DELAY回复（包含计算好的延迟值）
+                        if line.startswith('DELAY:'):
                             self.handle_delay_reply(line)
                             reply_count += 1
                             
@@ -175,40 +169,33 @@ class MPTCPSender(threading.Thread):
     
     def handle_delay_reply(self, reply_line):
         """
-        解析延迟回复行并计算延迟
+        【修正】处理receiver发回的one-way delay测量结果
         
         Args:
-            reply_line: 格式为 "PONG:timestamp_seconds:sequence"
+            reply_line: 格式为 "DELAY:delay_ms:sequence"
         """
         try:
             parts = reply_line.split(':')
             if len(parts) >= 3:
-                timestamp_seconds = float(parts[1])  # 【修复】直接使用秒时间戳
+                delay_ms = float(parts[1])  # receiver计算好的延迟值(ms)
                 sequence = int(parts[2])
                 
                 received_timestamp = time.time()
                 
-                # 计算延迟(毫秒)
-                delay_ms = (received_timestamp - timestamp_seconds) * 1000
-                
                 # 【添加】基本的延迟合理性检查
                 if 0 < delay_ms < 10000:  # 延迟应该在0-10秒之间
                     with self.delay_lock:
-                        # 验证这个回复对应的探测包确实发送过
-                        if sequence in self.pending_probes:
-                            del self.pending_probes[sequence]  # 移除pending记录
-                            
-                            # 存储延迟测量结果
-                            self.delay_measurements.append((delay_ms, received_timestamp))
-                            
-                            # 保持最近100次测量，避免内存无限增长
-                            if len(self.delay_measurements) > 100:
-                                self.delay_measurements.pop(0)
+                        # 直接存储receiver计算的延迟测量结果
+                        self.delay_measurements.append((delay_ms, received_timestamp))
+                        
+                        # 保持最近100次测量，避免内存无限增长
+                        if len(self.delay_measurements) > 100:
+                            self.delay_measurements.pop(0)
                 else:
                     print(f"[Sender] Invalid delay measurement: {delay_ms:.1f}ms, discarding")
                             
         except (ValueError, IndexError) as e:
-            print(f"[Sender] Invalid PONG format: {reply_line}, error: {e}")
+            print(f"[Sender] Invalid DELAY format: {reply_line}, error: {e}")
         
     def run(self):
         """建立一次MPTCP连接，发送多个文件"""
