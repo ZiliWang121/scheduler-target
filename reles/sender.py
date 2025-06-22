@@ -86,11 +86,10 @@ class MPTCPSender(threading.Thread):
         
         while self.transfer_event.is_set() and self.delay_active and probe_count < max_probes:
             try:
-                # 构造探测包: PING:timestamp_ms:sequence\n
+                # 【修复】构造探测包: PING:timestamp_seconds:sequence\n
                 sent_timestamp = time.time()
-                timestamp_ms = int(sent_timestamp * 1000)  # 毫秒时间戳
                 
-                probe_msg = f"PING:{timestamp_ms}:{self.probe_sequence}\n"
+                probe_msg = f"PING:{sent_timestamp:.6f}:{self.probe_sequence}\n"
                 probe_data = probe_msg.encode('utf-8')
                 
                 # 记录发送的探测包
@@ -127,50 +126,51 @@ class MPTCPSender(threading.Thread):
         """
         print("[Sender] Delay reply worker started")
         
-        # 设置socket为短超时，避免阻塞文件传输
-        original_timeout = sock.gettimeout()
-        sock.settimeout(0.1)  # 100ms超时
+        # 【修复】使用非阻塞模式而不是超时
+        import select
         
         buffer = b""
         reply_count = 0
         
         while self.transfer_event.is_set() and self.delay_active:
             try:
-                # 尝试接收数据
-                data = sock.recv(1024)
-                if not data:
-                    continue
-                    
-                buffer += data
+                # 使用select检查是否有数据可读，超时100ms
+                ready, _, _ = select.select([sock], [], [], 0.1)
                 
-                # 在buffer中查找完整的回复行
-                while b'\n' in buffer:
-                    line_end = buffer.find(b'\n')
-                    line = buffer[:line_end].decode('utf-8', errors='ignore')
-                    buffer = buffer[line_end + 1:]
+                if ready:
+                    # 有数据可读
+                    data = sock.recv(1024)
+                    if not data:
+                        continue
+                        
+                    buffer += data
                     
-                    # 检查是否是PONG回复
-                    if line.startswith('PONG:'):
-                        self.handle_delay_reply(line)
-                        reply_count += 1
+                    # 在buffer中查找完整的回复行
+                    while b'\n' in buffer:
+                        line_end = buffer.find(b'\n')
+                        line = buffer[:line_end].decode('utf-8', errors='ignore')
+                        buffer = buffer[line_end + 1:]
                         
-                        # 每20次回复打印一次统计
-                        if reply_count % 20 == 0:
-                            recent = self.get_recent_delays(window_ms=150)
-                            if recent:
-                                avg_delay = sum(recent) / len(recent)
-                                print(f"[Sender] Received {reply_count} replies, recent avg delay: {avg_delay:.1f}ms")
+                        # 检查是否是PONG回复
+                        if line.startswith('PONG:'):
+                            self.handle_delay_reply(line)
+                            reply_count += 1
+                            
+                            # 【增加】详细调试信息
+                            if reply_count <= 5 or reply_count % 20 == 0:
+                                recent = self.get_recent_delays(window_ms=150)
+                                if recent:
+                                    avg_delay = sum(recent) / len(recent)
+                                    latest_delay = recent[-1]
+                                    print(f"[Sender] Reply #{reply_count}: latest={latest_delay:.1f}ms, avg={avg_delay:.1f}ms")
+                else:
+                    # 没有数据，继续循环
+                    continue
                         
-            except socket.timeout:
-                # 超时是正常的，继续循环
-                continue
             except Exception as e:
                 print(f"[Sender] Reply receive error: {e}")
                 break
                 
-        # 恢复原始超时设置
-        if original_timeout is not None:
-            sock.settimeout(original_timeout)
         print(f"[Sender] Delay reply worker stopped, processed {reply_count} replies")
     
     def handle_delay_reply(self, reply_line):
@@ -178,31 +178,34 @@ class MPTCPSender(threading.Thread):
         解析延迟回复行并计算延迟
         
         Args:
-            reply_line: 格式为 "PONG:timestamp_ms:sequence"
+            reply_line: 格式为 "PONG:timestamp_seconds:sequence"
         """
         try:
             parts = reply_line.split(':')
             if len(parts) >= 3:
-                timestamp_ms = int(parts[1])
+                timestamp_seconds = float(parts[1])  # 【修复】直接使用秒时间戳
                 sequence = int(parts[2])
                 
-                sent_timestamp = timestamp_ms / 1000.0
                 received_timestamp = time.time()
                 
                 # 计算延迟(毫秒)
-                delay_ms = (received_timestamp - sent_timestamp) * 1000
+                delay_ms = (received_timestamp - timestamp_seconds) * 1000
                 
-                with self.delay_lock:
-                    # 验证这个回复对应的探测包确实发送过
-                    if sequence in self.pending_probes:
-                        del self.pending_probes[sequence]  # 移除pending记录
-                        
-                        # 存储延迟测量结果
-                        self.delay_measurements.append((delay_ms, received_timestamp))
-                        
-                        # 保持最近100次测量，避免内存无限增长
-                        if len(self.delay_measurements) > 100:
-                            self.delay_measurements.pop(0)
+                # 【添加】基本的延迟合理性检查
+                if 0 < delay_ms < 10000:  # 延迟应该在0-10秒之间
+                    with self.delay_lock:
+                        # 验证这个回复对应的探测包确实发送过
+                        if sequence in self.pending_probes:
+                            del self.pending_probes[sequence]  # 移除pending记录
+                            
+                            # 存储延迟测量结果
+                            self.delay_measurements.append((delay_ms, received_timestamp))
+                            
+                            # 保持最近100次测量，避免内存无限增长
+                            if len(self.delay_measurements) > 100:
+                                self.delay_measurements.pop(0)
+                else:
+                    print(f"[Sender] Invalid delay measurement: {delay_ms:.1f}ms, discarding")
                             
         except (ValueError, IndexError) as e:
             print(f"[Sender] Invalid PONG format: {reply_line}, error: {e}")

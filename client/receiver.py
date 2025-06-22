@@ -87,14 +87,14 @@ class ConnectionHandler(threading.Thread):
             
             # 处理PING并发送PONG回复
             try:
-                # 解析PING: "PING:timestamp_ms:sequence"
+                # 解析PING: "PING:timestamp_seconds:sequence"
                 parts = ping_line.split(':')
                 if len(parts) >= 3:
-                    timestamp_ms = parts[1]
+                    timestamp_seconds = parts[1]  # 【修复】保持原始格式
                     sequence = parts[2]
                     
-                    # 构造PONG回复: "PONG:timestamp_ms:sequence\n"
-                    pong_msg = f"PONG:{timestamp_ms}:{sequence}\n"
+                    # 构造PONG回复: "PONG:timestamp_seconds:sequence\n"
+                    pong_msg = f"PONG:{timestamp_seconds}:{sequence}\n"
                     pong_data = pong_msg.encode('utf-8')
                     
                     # 立即发送回复
