@@ -35,11 +35,9 @@ class Online_Agent(threading.Thread):
     :type event: class:'threading.event'
     :param explore: Whether or not to use action exploration
     :explore type: boolean
-    :param sender: 【修复】sender对象引用，用于获取延迟测量
-    :type sender: MPTCPSender
     """
 
-    def __init__(self, fd, cfg, memory, event, explore=True, sender=None):  # 【修复】添加sender参数
+    def __init__(self, fd, cfg, memory, event, explore=True):
         """Constructor Method"""
         threading.Thread.__init__(self)
         self.fd = fd
@@ -54,10 +52,8 @@ class Online_Agent(threading.Thread):
         self.ounoise = OUNoise(action_dimension=self.max_flows)
         self.agent = torch.load(self.agent_name)
         mpsched.persist_state(fd)
-        
-        # 【修复】传递sender给Env，确保延迟测量功能正常工作，并修复参数名冲突
         self.env = Env(fd=self.fd,
-                       time_interval=self.cfg.getfloat('env', 'time'),  # 【修复】使用新的参数名
+                       time=self.cfg.getfloat('env', 'time'),
                        k=self.cfg.getint('env', 'k'),
                        alpha=self.cfg.getfloat('env', 'alpha'),
                        b=self.cfg.getfloat('env', 'b'),
@@ -65,8 +61,7 @@ class Online_Agent(threading.Thread):
                        max_flows=self.max_flows,
                        # 添加对目标值的处理
                        target_tp=self.target_tp,
-                       target_rtt=self.target_rtt,
-                       sender=sender)  # 【关键修复】传递sender给Env
+                       target_rtt=self.target_rtt)
         self.event = event
         # 改进2: 添加模型同步相关变量
         self.step_count = 0  # 记录执行了多少步
@@ -121,24 +116,12 @@ class Online_Agent(threading.Thread):
         """Override the run method from threading with the desired behaviour of the Online Agent class"""
         if True:
             self.event.wait()
-            
-            # 【强制验证】：在开始训练前检查延迟测量系统是否就绪
-            if self.env.sender is None:
-                logging.error("[Online Agent] *** CRITICAL ERROR: No sender reference for delay measurement ***")
-                logging.error("[Online Agent] *** ONE-WAY DELAY SYSTEM NOT INITIALIZED ***")
-                logging.error("[Online Agent] *** CANNOT PROCEED WITHOUT DELAY MEASUREMENT ***")
-                return
-            else:
-                logging.info("[Online Agent] ✓ Delay measurement system initialized")
-            
             state = self.env.reset()
             k = self.cfg.getint('env', 'k')  # k=8
             # 改进4: 减少初始化日志的频率
             logging.info(
                 f"[Online Agent] Initial RTTs = {np.array(state)[self.max_flows:self.max_flows*2,-1].tolist()}"
             )
-            logging.info("[Online Agent] *** STARTING TRAINING WITH MANDATORY ONE-WAY DELAY MEASUREMENT ***")
-            
             state = torch.FloatTensor(state).view(-1, 1, k, 1)
             while True:
                 self.step_count += 1
@@ -146,13 +129,6 @@ class Online_Agent(threading.Thread):
                 if self.step_count % self.model_sync_interval == 0:
                     if self._should_reload_model():
                         self._reload_model()
-                        
-                # 【简化验证】：定期检查延迟测量系统状态
-                if self.step_count % 20 == 0 and self.step_count > 10:  # 给更多启动时间
-                    recent_delays = self.env.sender.get_recent_delays(window_ms=500)
-                    if not recent_delays:
-                        logging.info(f"[Online Agent] Step {self.step_count}: Still waiting for delay measurements")
-                        
                 start = time.time()
                 if self.explore:
                     action = self.agent.select_action(state, self.ounoise)

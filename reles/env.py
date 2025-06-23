@@ -8,22 +8,20 @@ class Env():
     
     :param fd: socket file descriptor
     :type fd: int
-    :param time_interval: Stater Interval (SI). usually 3~4 RTTs  # 【修复】重命名参数
-    :type time_interval: int
+    :param time: Stater Interval (SI). usually 3~4 RTTs
+    :type time: int
     :param k: Number of past timesteps used in the stacked LSTM
     :type k: int
     :param alpha: first parameter of reward function to scale BDP (reduce bufferbloat|min->favors fast paths)
     :type alpha: float
     :param beta: second parameter of reward function to scale number of loss packets (reflects network congetsion|min->favors less congested paths)
     :type beta: float
-    :param sender: 【修复】sender对象引用，用于获取延迟测量
-    :type sender: MPTCPSender
     """
-    def __init__(self,fd,time_interval,k,alpha,b,c,max_flows,target_tp,target_rtt,sender=None):  # 【修复】重命名time参数避免冲突
+    def __init__(self,fd,time,k,alpha,b,c,max_flows,target_tp,target_rtt):
         """Constructor method
         """
         self.fd = fd
-        self.time = time_interval  # 【修复】使用重命名的参数
+        self.time = time
         self.k = k
         self.alpha = alpha
         self.b = b
@@ -42,57 +40,10 @@ class Env():
         self.cwnd = [[] for _ in range(self.max_num_flows)]        #cwnd sender
         self.rr = [[] for _ in range(self.max_num_flows)]        #number of unacked packets (in flight)
         self.in_flight = [[] for _ in range(self.max_num_flows)]    #number of TOTAL retransmissions
-        
-        # 【新增】：用于跟踪meta层面的确认字节数，计算真实吞吐量
-        self.last_bytes_acked = 0    # 上一次的meta.mptcpi_bytes_acked值
-        self.current_bytes_acked = 0 # 当前的meta.mptcpi_bytes_acked值
-        
-        # 【新增】：用于调试和验证的计数器
-        self.meta_measurement_count = 0  # meta测量次数计数
-        
-        # 【修复】：延迟测量相关
-        self.sender = sender  # 对sender的引用，用于获取延迟测量
-        self.delay_weight = 0.3  # 延迟在reward中的权重，可根据需要调整
-        
-        # 【新增】：延迟测量统计
-        self.delay_measurement_count = 0  # 延迟测量计数
-        self.last_delay_check_time = time.time()  # 上次检查延迟的时间
 
     def get_targets(self):
         """获取当前目标值"""
         return self.static_target_tp, self.static_target_rtt
-
-    def _extract_meta_info(self, raw_state):
-        """
-        从get_sub_info返回的原始数据中提取meta信息
-        
-        :param raw_state: mpsched.get_sub_info()返回的原始列表
-        :return: (subflow_data, bytes_acked) 元组
-        """
-        if not raw_state:
-            return [], None
-            
-        # 检查是否包含meta信息：最后一个元素且长度为1（只有bytes_acked）
-        if len(raw_state) > 0 and isinstance(raw_state[-1], list) and len(raw_state[-1]) == 1:
-            # 分离子流数据和meta数据
-            subflow_data = raw_state[:-1]  # 除了最后一个元素的所有子流数据
-            bytes_acked = raw_state[-1][0] # 最后一个元素的第一个值是bytes_acked
-            return subflow_data, bytes_acked
-        else:
-            # 兼容旧版本：没有meta信息的情况
-            return raw_state, None
-
-    def _update_meta_tracking(self, bytes_acked):
-        """
-        更新meta层面的字节确认跟踪
-        
-        :param bytes_acked: meta.mptcpi_bytes_acked值
-        """
-        if bytes_acked is not None:
-            # 更新字节确认跟踪
-            self.last_bytes_acked = self.current_bytes_acked
-            self.current_bytes_acked = bytes_acked
-            self.meta_measurement_count += 1
 
     def adjust(self,state):
         """Converts the raw observations collected with mpsched socket api into appropriate values for state information and reward
@@ -103,15 +54,6 @@ class Env():
         :return: State parameters
         :rtype: list
         """
-        # 【新增】：提取并处理meta信息
-        subflow_state, bytes_acked = self._extract_meta_info(state)
-        
-        # 【新增】：更新meta层面的跟踪信息（用于reward计算）
-        self._update_meta_tracking(bytes_acked)
-        
-        # 【保持原有逻辑】：处理子流状态信息（用于state构建）
-        state = subflow_state  # 使用分离后的子流数据继续原有处理逻辑
-        
         # 1. 首先处理目标序列（全局的，只处理一次）
         if len(self.target_tp) == self.k:
             self.target_tp.pop(0)
@@ -149,111 +91,29 @@ class Env():
         self.in_flight[0],self.in_flight[1],self.target_tp,self.target_rtt]
         
     def reward(self):
-        """
-        【关键修复】：改进reward函数，集成真实的one-way delay测量
-        
-        修复要点：
-        1. 基于meta层面的mptcpi_bytes_acked计算真实application throughput
-        2. 使用PING测量的真实端到端单向延迟（one-way delay）
-        3. 更好的fallback机制和错误处理
-        4. 详细的调试信息
-        
-        原逻辑：基于子流segments out的瞬时发送吞吐量 + 基于子流加权RTT
-        新逻辑：基于meta层面确认字节数的确认吞吐量 + 基于PING的真实端到端单向延迟
+        """Calculates the reward of the last SI using the ReLes reward function which consideres multiple QoS parameters
+        After making measruements of path parameters with mpsched call adjust to apply changes to the Environments' state variables
+        that are used for the reward calculation
         
         :return: Reward value
         :type: float
         """
         # 获取目标值
         target_tp, target_rtt = self.get_targets()
-        
-        # 【关键修复1】：改用meta层面的确认吞吐量计算
-        if self.last_bytes_acked > 0 and self.current_bytes_acked >= self.last_bytes_acked:
-            # 计算在这个SI期间确认的字节数增量
-            bytes_acked_delta = self.current_bytes_acked - self.last_bytes_acked
-            # 转换为Mbps：字节 -> 比特 -> Mbps
-            V_throughput = (bytes_acked_delta * 8) / (self.time * 1000 * 1000)  # Mbps
+        V_throughput = self.tp[0][self.k-1] + self.tp[1][self.k-1]  # KB per SI 0.2s
+        #rewards = ((self.tp[0][self.k-1])+(self.tp[1][self.k-1]))
+        if V_throughput>0:
+            V_RTT = (self.tp[0][self.k-1] * self.rtt[0][self.k-1] + 
+                 self.tp[1][self.k-1] * self.rtt[1][self.k-1]) / V_throughput
         else:
-            # 如果是第一次测量或者数据异常，回退到原有计算方式
-            V_throughput_segments = self.tp[0][self.k-1] + self.tp[1][self.k-1]  # KB per SI
-            V_throughput = V_throughput_segments * 8 / (self.time * 1000)  # Mbps
-            if self.meta_measurement_count % 10 == 0:  # 偶尔提示回退
-                print(f"[Env.reward] Using fallback throughput calculation")
-        
-        # 【关键修复2】：强制使用PING测量的真实端到端单向延迟（one-way delay）
-        V_RTT = self._calculate_ping_delay()
-        if V_RTT is None:
-            # 【简化】：如果没有延迟数据，使用目标值并标记
-            print(f"[Env.reward] WAITING for one-way delay data...")
-            V_RTT = target_rtt * 1000  # 转换为ms
-        else:
-            # 使用PING测量的延迟（已经是ms单位）
-            if self.delay_measurement_count % 5 == 0:
-                print(f"[Env.reward] ✓ USING ONE-WAY DELAY: {V_RTT:.1f}ms")
-        
-        # 【保持原有loss计算】：基于子流重传数据
+            V_RTT = 0
+        V_throughput =  V_throughput * 8 / (self.time * 1000)  # Mbps
+        # V_loss = Σv_t,i (总重传包数)
         V_loss = self.in_flight[0][self.k-1] + self.in_flight[1][self.k-1]
-        
-        # 【修复reward函数】：综合考虑吞吐量和延迟
-        # 将延迟从ms转换为s以匹配目标单位
-        V_RTT_seconds = V_RTT / 1000.0
-        
-        throughput_reward = -abs(target_tp - V_throughput)
-        delay_reward = -abs(target_rtt - V_RTT_seconds)
-        
-        # 加权组合：吞吐量占主导，延迟作为补充
-        reward = (1 - self.delay_weight) * throughput_reward + self.delay_weight * delay_reward
-        
-        # 【增强的调试信息】：明确显示新旧计算方式的对比和延迟信息
-        if self.meta_measurement_count % 10 == 0:  # 每10次计算显示一次详细对比
-            segments_tp = (self.tp[0][self.k-1] + self.tp[1][self.k-1]) * 8 / (self.time * 1000)
-            print(f"[Env.reward] META_TP={V_throughput:.3f} Mbps, "
-                  f"SEGMENTS_TP={segments_tp:.3f} Mbps, "
-                  f"DELAY={V_RTT:.1f}ms, "
-                  f"TARGET_TP={target_tp:.3f}, TARGET_RTT={target_rtt*1000:.1f}ms, "
-                  f"reward={reward:.3f}")
-        else:
-            print(f"[Env.reward] TP={V_throughput:.2f} Mbps, DELAY={V_RTT:.1f}ms, reward={reward:.3f}")
-            
-        return reward
-    
-    def _calculate_ping_delay(self):
-        """
-        【简化】从sender获取最近的one-way delay测量并计算平均值
-        
-        Returns:
-            float or None: 平均单向延迟(ms)，如果没有可用数据则返回None
-        """
-        if self.sender is None:
-            return None
-            
-        try:
-            # 获取最近150ms内的延迟测量
-            recent_delays = self.sender.get_recent_delays(window_ms=150)
-            
-            if not recent_delays:
-                return None  # 简单返回None，不打印错误
-                
-            # 验证延迟合理性
-            valid_delays = [d for d in recent_delays if 1.0 <= d <= 2000.0]
-            
-            if not valid_delays:
-                return None
-            
-            # 计算平均延迟
-            if len(valid_delays) >= 3:
-                # 排除最大最小值
-                sorted_delays = sorted(valid_delays)
-                trimmed = sorted_delays[1:-1] if len(sorted_delays) > 2 else sorted_delays
-                avg_delay = sum(trimmed) / len(trimmed)
-            else:
-                avg_delay = sum(valid_delays) / len(valid_delays)
-            
-            self.delay_measurement_count += 1
-            return avg_delay
-            
-        except Exception as e:
-            return None
+        # 最终奖励
+        reward = - abs(target_tp - V_throughput)
+        print(f"[Env.reward] TP={V_throughput:.2f} Mbps, reward={reward:.3f}")
+        return reward  # ← 返回正确计算的reward
         
     def reset(self):
         #在MPTCP连接开始时初始化LSTM需要的历史数据
@@ -263,34 +123,10 @@ class Env():
         :return: State parameters
         :rtype: list
         """
-        # 【新增】：重置meta跟踪变量
-        self.last_bytes_acked = 0
-        self.current_bytes_acked = 0
-        self.meta_measurement_count = 0
-        
-        # 【新增】：重置延迟测量变量
-        self.delay_measurement_count = 0
-        self.last_delay_check_time = time.time()
-        
-        raw_state = mpsched.get_sub_info(self.fd)
-        subflow_state, bytes_acked = self._extract_meta_info(raw_state)
-        
-        # 【新增】：初始化meta跟踪（但不用于reward计算，因为还没有增量）
-        if bytes_acked:
-            self.current_bytes_acked = bytes_acked
-            self.last_bytes_acked = self.current_bytes_acked  # 初始状态：上一次=当前次
-            print(f"[Env.reset] Initial meta bytes_acked = {self.current_bytes_acked}")
-        
-        self.last = subflow_state
-        
+        self.last = mpsched.get_sub_info(self.fd)
         #record k measurements
         for i in range(self.k):
-            raw_subs = mpsched.get_sub_info(self.fd)
-            subs, bytes_acked = self._extract_meta_info(raw_subs)
-            
-            # 【新增】：在reset期间也要更新meta跟踪
-            self._update_meta_tracking(bytes_acked)
-            
+            subs=mpsched.get_sub_info(self.fd)
             for j in range(self.max_num_flows):
                 if len(self.tp[j]) == self.k:
                     self.tp[j].pop(0)
@@ -313,7 +149,6 @@ class Env():
                 self.in_flight[j].append(np.abs(subs[j][4]-self.last[j][4]))
             self.last = subs
             time.sleep((self.time)/10) 
-            
         # 初始化目标序列：填充k个相同的目标值
         target_tp, target_rtt = self.get_targets()
         for _ in range(self.k):
@@ -360,17 +195,21 @@ class Env():
         #print(f"[DEBUG] set_seg returned: {result}")
         #mpsched.set_seg(A)
         
-        time.sleep(self.time)
-        raw_state_nxt = mpsched.get_sub_info(self.fd)
-        subflow_state_nxt, _ = self._extract_meta_info(raw_state_nxt)
         
-        print(f"[Env.step] New raw subflow state = {subflow_state_nxt}")
+        time.sleep(self.time)
+        state_nxt = mpsched.get_sub_info(self.fd)
+        print(f"[Env.step] New raw subflow state = {state_nxt}")
         done = False
-        if not subflow_state_nxt:
+        if not state_nxt:
             done = True
-            
-        # 【保持原有接口】：adjust()和reward()的调用方式不变，但内部逻辑已更新
-        state_nxt = self.adjust(raw_state_nxt)  # 传入完整原始数据，let adjust()处理meta分离
+        state_nxt = self.adjust(state_nxt)
         reward = (self.reward())
         
         return state_nxt,reward,done
+        
+    
+    
+        
+        
+        
+        
